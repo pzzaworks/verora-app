@@ -1,0 +1,79 @@
+---
+title: Fees and Economics
+description: Where every wei of a query payment goes, the minimums and bounds that apply, and how staking rewards and slashing are funded.
+icon: Wallet
+---
+
+Verora has no protocol token. Queries are paid in native ETH, agents and stakers are paid in ETH, and the
+platform fee goes to the `Treasury`. Gas for relaying answers and settling queries is paid by the oracle.
+
+## Who pays what
+
+| Party | Pays | Receives |
+| --- | --- | --- |
+| Requester | The query payment (`msg.value`) and gas for `createQuery` | A full refund if nobody answers, the oracle rejects every answer, or they cancel first |
+| Agent owner | Nothing per query (answers are relayed); gas only for registration, updates, and withdrawals | The agent fee share for every query where the agent's answer is accepted (or paid by permissionless expiry) |
+| Staker | The stake, plus gas | The staker fee share of the agent's settled queries |
+| Oracle | Gas for `submitResponseFor`, `finalizeQuery`, and `failExpiredQuery` | Nothing from the contracts |
+| Treasury | - | The platform fee, slashed stake, and staker rewards that had no stakers |
+
+## Splitting a payment
+
+<Steps>
+  <Step>
+    **Between responders.** At settlement the payment is divided equally between the responders the
+    oracle accepted: `share = payment / acceptedCount`, with the remainder going to the last one. Rejected
+    responders and assigned agents that didn't answer receive nothing. If the query is closed by
+    permissionless expiry after the 1 hour grace period, every responder is a payee. If nobody is
+    accepted, the whole payment is refunded to the requester instead.
+  </Step>
+  <Step>
+    **Within each share.** The `PaymentRouter` splits each share by the fee split (defaults: 80% agent
+    owner, 10% stakers, 10% treasury). Rounding favors the agent.
+  </Step>
+</Steps>
+
+### Worked example
+
+A query pays 0.01 ETH to two agents and both answer, with the default split:
+
+| | Agent A | Agent B |
+| --- | --- | --- |
+| Share | 0.005 ETH | 0.005 ETH |
+| Agent owner (80%) | 0.004 ETH | 0.004 ETH |
+| Stakers of that agent (10%) | 0.0005 ETH | 0.0005 ETH |
+| Treasury (10%) | 0.0005 ETH | 0.0005 ETH |
+
+If only Agent A answers, it receives the whole 0.01 ETH share and Agent B gets a recorded failure.
+
+## Minimums and bounds
+
+| Parameter | Default (deploy script) | Where it is enforced |
+| --- | --- | --- |
+| Minimum payment per assigned agent | 0.0001 ETH (`MIN_PAYMENT_PER_AGENT`) | `QueryConsumer.createQuery`; the payment must also be non-zero |
+| Minimum stake per `stake()` call | 0.01 ETH (`MIN_STAKE`) | `StakingPool.stake` |
+| Unstaking period | 7 days (`UNSTAKING_PERIOD`), at most 30 days | `StakingPool.unstake` |
+| Platform fee | 10%, at most 20% | `PaymentRouter.setFeeSplit` |
+| Staker fee | 10%, at most 30% | `PaymentRouter.setFeeSplit` |
+| Agent fee | 80%, at least 50% | `PaymentRouter.setFeeSplit` |
+| Maximum slash | 50% of the agent's pool per call | `StakingPool.slash` |
+
+The owner can change the minimums and the split within these bounds. Read live values with
+`QueryConsumer.minPaymentPerAgent()`, `StakingPool.getMinimumStake()`,
+`StakingPool.getUnstakingPeriod()`, and `PaymentRouter.getFeeSplit()`.
+
+## Withdrawals
+
+| Balance | Read | Withdraw |
+| --- | --- | --- |
+| Agent fees | `PaymentRouter.getPendingFees(owner)` | `PaymentRouter.withdrawFees()` |
+| Staker rewards | `StakingPool.getStake(agentId, staker).pendingRewards` | `StakingPool.claimRewards(agentId)` |
+| Unbonded stake | `StakingPool.getStake(agentId, staker).withdrawableAmount` | `StakingPool.withdraw(agentId)` |
+| Failed refund pushes (refunds are pushed with a 30,000 gas cap and credited if that fails) | `QueryConsumer.getPendingRefund(requester)` | `QueryConsumer.withdrawRefund()` |
+
+## Staking yield
+
+Staker rewards scale with the agent's settled query volume and the staker fee. The API reports a
+trailing APY per agent and network-wide: the rewards distributed over the last 30 days, annualized
+(`x 365 / 30`), divided by the current total stake, as a percentage. It is a backward-looking estimate,
+not a promise.

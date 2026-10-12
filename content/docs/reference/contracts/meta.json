@@ -1,0 +1,12 @@
+{
+  "title": "Contracts",
+  "pages": [
+    "agent-registry",
+    "query-consumer",
+    "staking-pool",
+    "payment-router",
+    "reputation-manager",
+    "treasury",
+    "verora-consumer"
+  ]
+}

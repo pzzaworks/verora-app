@@ -1,0 +1,81 @@
+---
+title: Security Model
+description: Who is trusted with what, what each role can and can't do, and the protections built into the contracts, the oracle, and the API.
+icon: ShieldCheck
+---
+
+<Callout title="Audit status" type="warn">
+  Mainnet deployment requires an external audit first. The public network is Ethereum Sepolia (chain 11155111).
+</Callout>
+
+## Roles and trust
+
+| Role | Can | Can't |
+| --- | --- | --- |
+| Requester | Create, cancel (before any response), and expire queries; withdraw refunds. | Take back escrow once an agent has answered. |
+| Agent owner | Register, update, suspend, and reactivate own agents; answer assigned queries; withdraw fees. | Answer for agents they don't own, answer twice, answer after the deadline, or lift an admin suspension or a slash. |
+| Oracle (authorized finalizer) | Relay owner-signed answers, finalize queries that have responses (choosing the aggregated result and which responders to accept), and expire queries. | Forge or alter answers (signatures are checked on-chain), accept an agent that didn't respond, redirect payments, or finalize without responses. |
+| Staker | Stake, unstake, withdraw, and claim rewards. | Withdraw unbonding stake early or escape a slash while unbonding. |
+| Slasher (owner or authorized address) | Slash up to 50% of an agent's pool per call, sending it to the treasury. | Send slashed funds anywhere but the treasury. |
+| Contract owner | Pause new entries, change minimums and limits within bounds, set the fee split within bounds, authorize finalizers, slashers, and recorders, replace linked contracts (payment router, reputation manager, staking pool, treasury), suspend or reactivate agents, finalize queries, and withdraw from the treasury. | Set the agent fee below 50% or the platform fee above 20%, slash more than 50% per call, or set an unstaking period above 30 days. |
+
+<Callout title="The owner is trusted" type="warn">
+  The contract owner can replace the linked `PaymentRouter`, `ReputationManager`, `StakingPool`, and
+  treasury addresses, and is itself allowed to finalize queries. Treat the owner as fully trusted, and
+  hand ownership to a multisig (the deploy script's `OWNER`) on public networks.
+</Callout>
+
+<Callout title="What the finalizer decides" type="warn">
+  The finalizer chooses the `aggregatedResult` and the `acceptedAgents` passed to `finalizeQuery`. Only
+  accepted responders are paid and earn reputation; rejected responders are unpaid and get a failure, and
+  an empty accepted set fails the query and refunds the requester. The individual signed responses remain
+  on-chain and verifiable, but a consumer contract that only reads the callback result trusts the
+  finalizer's aggregation. If the finalizer stays silent, anyone can close a query with responses 1 hour
+  after the deadline, paying every responder but granting no reputation. The reference oracle aggregates deterministically (see
+  [Core Concepts](/docs/concepts#aggregation)).
+</Callout>
+
+## Contract protections
+
+- **Escrow can't get stuck.** Every exit path (finalize, expiry, cancel) only depends on agents existing, never on them being active. Queries live at most 30 days, and `failExpiredQuery` is permissionless (immediately after the deadline without responses, 1 hour after it with responses).
+- **Pause only blocks entries.** Pausing stops new registrations, queries, and stakes; responses, settlement, refunds, unstaking, withdrawals, and claims keep working.
+- **Reputation can't be farmed cheaply.** Every query lasts at least `minQueryDuration`, so agents always get a fair window. Successes only come from responses the finalizer accepted, never when the requester owns the agent, and never from permissionless expiry. Non-responders only get a failure after the deadline and only if the window was at least `minQueryDuration`.
+- **Bounded fee split.** Platform fee at most 20%, staker fee at most 30%, agent fee at least 50%.
+- **Bounded loops and payloads.** At most 10 agents per query, 16 KB payloads, 32 capabilities, 20 unbonding requests per position; reward distribution and slashing are O(1).
+- **Pull payments and refund fallbacks.** Agent fees are withdrawn by owners; refunds are pushed with a 30,000 gas cap, and failed refund and treasury pushes are credited (claimable with `withdrawRefund()`) instead of reverting settlement.
+- **Callback isolation.** Consumer callbacks (`onQueryFulfilled`, `onQueryFailed`) run with a gas cap, their reverts are caught and only 256 bytes of revert data are copied, and settlement reverts if there isn't enough gas left to run the callback, so a caller can't starve it.
+- **Reentrancy guards** on the public entry points that move ETH, and **two-step ownership** (`Ownable2Step`) on every contract.
+- **Signature replay protection.** The EIP-712 domain binds signatures to the chain and the `QueryConsumer`, the `Response` struct binds them to the query ID, agent ID, and the hashes of the stored `queryType` and `queryData`, and each agent can answer a query once.
+
+## Oracle and API protections
+
+- **SSRF-safe outbound requests.** Agent endpoints and metadata URIs are fetched over `https` only, every resolved IP is checked at connect time against private and reserved ranges (so DNS rebinding can't swap in an internal address), redirects are not followed, URL credentials are rejected, and responses are size- and time-limited.
+- **Verify before spending gas.** The oracle simulates every transaction and checks agent signatures before sending.
+- **Least-privilege oracle key.** The oracle key only needs gas and the finalizer role; it must not be the contract owner.
+- **Sanitized metadata.** Only known fields are kept; URLs must be `https` (or the API's own origin), so the app never renders `javascript:` or `data:` links.
+- **Safe image hosting.** Images are accepted only as PNG, JPEG, GIF, or WebP, verified by magic bytes (no SVG), and served with a sandboxing content security policy.
+- **SIWE sessions.** Single-use nonces stored in the database, domain and chain checks, 10-minute message freshness, and one-hour sessions. Smart contract wallets are supported.
+- **Hardened HTTP.** Strict validation (unknown fields rejected), rate limiting, an origin allowlist for CORS, body size limits, Helmet headers, and error responses that never expose internals.
+- **Production guardrails.** The API refuses to start in production with private agent endpoints allowed or without CORS and SIWE allowlists.
+
+## Encryption
+
+Encrypted queries keep prompts and answers confidential from everyone except the requester and the
+target agent, including the oracle. They don't hide metadata such as the requester, the agent, payment,
+timing, or payload sizes. See [End-to-End Encryption](/docs/guides/encryption#what-is-and-isnt-private).
+
+A requester's key pair is derived from a wallet signature of `ENCRYPTION_KEY_MESSAGE`. Anyone who obtains
+that signature can derive the key and read every encrypted answer sent to it, so only ask users to sign
+it on origins you trust. Decryption validates every field (strict base64, nonce and key lengths) and
+reports any failure as `EncryptionError`.
+
+## Operator checklist
+
+<Steps>
+  <Step>Keep the deployer and owner keys in a keystore or hardware wallet, and hand ownership to a multisig with `OWNER`.</Step>
+  <Step>Use a dedicated, gas-only key for the oracle and never reuse the owner key.</Step>
+  <Step>Set `NODE_ENV=production`, `CORS_ORIGINS`, `SIWE_DOMAINS`, a random `JWT_SECRET` of at least 32 characters, and `TRUST_PROXY_HOPS` to match your proxies.</Step>
+  <Step>Use `CONFIRMATIONS` of 3 or more on public networks.</Step>
+  <Step>Agent operators: keep the owner key and the X25519 secret key in a secrets manager or HSM.</Step>
+  <Step>Agent operators: run every request through `verifyAgentQueryRequest` before signing, and return generic errors for internal failures.</Step>
+</Steps>

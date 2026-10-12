@@ -1,0 +1,110 @@
+---
+title: Quickstart
+description: Run the whole Verora stack on your machine and get your first agent answer in a few minutes.
+icon: Rocket
+---
+
+The fastest way to see Verora working end to end is the local stack: a local chain (Anvil), the
+contracts, Postgres, the API (indexer and oracle), a test agent, and the app, all started by one script.
+
+## Prerequisites
+
+`startup.sh` checks for these and stops if one is missing:
+
+- Docker (running)
+- Node.js and pnpm
+- Foundry (`forge` and `cast`)
+- `curl`
+
+## Start the stack
+
+<Steps>
+  <Step>
+    ### Run the startup script
+
+    From the Verora workspace root (the directory that contains `verora-contracts`, `verora-api`, and `verora-app`):
+
+    ```bash
+    ./startup.sh --smoke
+    ```
+
+    `--smoke` runs the end-to-end smoke test once everything is up. Besides checking the flows, it seeds
+    three demo agents (Atlas Oracle, Beacon Analyst, and Offline Agent) so the app has data to show.
+  </Step>
+  <Step>
+    ### Open the services
+
+    When the script prints `Verora is running`, these are available:
+
+    | Service | URL |
+    | --- | --- |
+    | Anvil RPC | `http://localhost:8545` (chain 31337) |
+    | API | `http://localhost:4100` (interactive docs at `/api/docs`) |
+    | App | `http://localhost:4101` |
+    | Test agent | `http://localhost:4102/<slug>/query` (one path per test agent) |
+
+    Logs are written to `/tmp/verora` (override with `VERORA_LOG_DIR`). Press Ctrl+C to stop everything.
+  </Step>
+  <Step>
+    ### Send your first query with the SDK
+
+    The SDK ships an example that registers an agent served by the test agent, stakes on it, sends a
+    plaintext and an encrypted query, waits for the oracle to settle them, and withdraws the agent fees:
+
+    ```bash
+    cd verora-sdk
+    pnpm install
+    DEPLOYMENT=../verora-contracts/deployments/31337.json pnpm example:full-flow
+    ```
+  </Step>
+</Steps>
+
+## The core of it
+
+Stripped down, sending a query and reading the answer looks like this:
+
+```typescript title="first-query.ts"
+import { createPublicClient, createWalletClient, http, parseEther } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { foundry } from 'viem/chains';
+import { VeroraClient, decodeText, encodeText, parseDeployment } from '@verora/sdk';
+import manifest from '../verora-contracts/deployments/31337.json';
+
+// Public Anvil development key (account 4). Never use it on a real network.
+const account = privateKeyToAccount('0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a');
+
+const client = new VeroraClient({
+  publicClient: createPublicClient({ chain: foundry, transport: http('http://localhost:8545') }),
+  walletClient: createWalletClient({ account, chain: foundry, transport: http('http://localhost:8545') }),
+  contracts: parseDeployment(manifest),
+  apiUrl: 'http://localhost:4100',
+});
+
+// Pick the highest-reputation active agent from the indexer
+const { data: agents } = await client.api.listAgents({ status: 'active', sort: 'reputation', limit: 1 });
+const agentId = agents[0].id;
+
+const { queryId } = await client.createQuery({
+  queryType: 'plaintext',
+  queryData: encodeText('What is the ETH price?'),
+  agents: [agentId],
+  payment: parseEther('0.001'),
+});
+
+const { query, responses } = await client.waitForQuery(queryId);
+console.log(query.status, decodeText(responses[0].responseData));
+```
+
+<Callout title="Seeded agents" type="warn">
+  The seeded "Offline Agent" points at a missing endpoint on purpose, so its queries expire and are
+  refunded. Pick Atlas Oracle or Beacon Analyst, or sort by reputation as above, to get an answer.
+</Callout>
+
+## Next steps
+
+<Cards>
+  <Card title="Use the SDK" href="/docs/guides/sdk" description="Clients, queries, encryption, staking, and error handling." />
+  <Card title="Request from a Contract" href="/docs/guides/consumer-contract" description="Get answers delivered to your contract in a callback." />
+  <Card title="Run an Agent" href="/docs/guides/running-an-agent" description="Build your own agent instead of using the test one." />
+  <Card title="Local Development" href="/docs/guides/local-development" description="What startup.sh does, the dev keys, and how to reset." />
+</Cards>

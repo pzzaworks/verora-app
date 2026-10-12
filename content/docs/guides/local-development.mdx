@@ -1,0 +1,142 @@
+---
+title: Local Development
+description: What startup.sh starts, the development keys it uses, the smoke test and its seed data, and how to work on each component.
+icon: Terminal
+---
+
+`startup.sh` in the Verora workspace root runs the complete stack locally: Anvil and Postgres in Docker,
+freshly deployed contracts, the test agent, the API (indexer and oracle), and the app.
+
+## Usage
+
+```bash
+./startup.sh [--smoke] [--no-app]
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--smoke` | Runs the end-to-end smoke test once the stack is up (also seeds demo data). |
+| `--no-app` | Doesn't start the Next.js app. |
+
+Ctrl+C stops every process and runs `docker compose down`. Logs go to `/tmp/verora` unless
+`VERORA_LOG_DIR` is set (the agent log, `api.log`, `app.log`, `migrate.log`).
+
+## What it does
+
+<Steps>
+  <Step>
+    **Checks prerequisites:** `docker`, `node`, `pnpm`, `forge`, `cast`, and `curl`, and that Docker is running.
+  </Step>
+  <Step>
+    **Starts Anvil and Postgres** with `docker compose`. Anvil runs chain ID 31337 with 10 accounts of
+    10,000 ETH and a 1-second block time on port 8545. Postgres 16 listens on port 5433 with user,
+    password, and database `verora`.
+  </Step>
+  <Step>
+    **Installs dependencies** with `pnpm install --frozen-lockfile` in `verora-api`, `verora-app`,
+    the test agent, and `test-utils/smoke`.
+  </Step>
+  <Step>
+    **Deploys the contracts** with `script/Deploy.s.sol`, using `FINALIZER` set to the oracle address,
+    `MIN_STAKE=0.01 ETH`, and `UNSTAKING_PERIOD=86400` (1 day). The addresses are read back from
+    `verora-contracts/deployments/31337.json` and exported.
+  </Step>
+  <Step>
+    **Migrates the database** with `prisma migrate deploy`.
+  </Step>
+  <Step>
+    **Starts the services:** the test agent on 4102, the API on 4100 (`pnpm start:dev`), and the app on 4101
+    (`pnpm dev`), waiting for each health check before moving on.
+  </Step>
+</Steps>
+
+<Callout title="Everything is ephemeral" type="warn">
+  Postgres stores its data on a tmpfs and Anvil starts from genesis on every run, because indexed data
+  would be stale against a recreated chain. Each run redeploys the contracts; on a fresh Anvil they land
+  at the same addresses (see [Deployments](/docs/reference/deployments)).
+</Callout>
+
+## Development accounts
+
+The script only uses public Anvil development keys. Never reuse them on a real network.
+
+| Role | Anvil account | Address |
+| --- | --- | --- |
+| Deployer and contract owner | 0 | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
+| Agent owners (keys held by the test agent) | 1, 2, 3 | Derived from the agent owner keys in `startup.sh` |
+| Requester used by the smoke test and SDK example | 4 | Derived from the key in `test-utils/smoke/smoke.ts` |
+| Staker used by the smoke test | 5 | Derived from the key in `test-utils/smoke/smoke.ts` |
+| Oracle (authorized finalizer) | 9 | `0xa0Ee7A142d267C1f36714E4a8F75612F20a79720` |
+
+## The test agent
+
+The local stack's agents are served by the
+[test agent](https://github.com/pzzaworks/verora-sdk/tree/main/examples/test-agent) in the SDK repository
+(`verora-sdk/examples/test-agent`). It is one process serving several deterministic test agents, each
+on its own path, and it implements agent protocol v1 with the SDK exactly like a production agent should:
+every request goes through `parseAgentQueryRequest` and `verifyAgentQueryRequest` before it is answered,
+encrypted queries get encrypted answers, and every answer is signed with `signAgentResponse` using that
+agent's owner key. Its answers are canned test data, not AI output.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /<slug>/query` | Agent protocol v1 endpoint of one test agent. Register this URL as the agent's endpoint. |
+| `GET /<slug>/encryption/public-key` | That agent's X25519 public key. |
+| `GET /health` | Health probe used by the API. |
+
+It listens on port 4102 by default. Each agent is configured with its own owner key and encryption key
+through environment variables; see the test agent's source for the exact names.
+
+## The smoke test and seed data
+
+`./startup.sh --smoke` runs `test-utils/smoke/smoke.ts` against the running stack. It exercises the real
+flows and leaves their data behind, which doubles as seed data for the app:
+
+- SIWE sign-in (and replay rejection) and hosted metadata with real PNG icons.
+- Three agents registered on-chain: **Atlas Oracle** and **Beacon Analyst** served by the test agent, and **Offline Agent** pointing at a missing endpoint.
+- A 1 ETH stake on Atlas Oracle, indexed by the API.
+- A plaintext query to two agents, relayed and finalized by the oracle, with fee, treasury, and staker reward checks.
+- An end-to-end encrypted query, decrypted with the wallet-derived key.
+- A query to the Offline Agent that the oracle expires and refunds once its deadline passes.
+- Fee withdrawal, reward claim, unbonding, and withdrawal (fast-forwarding Anvil time past the unstaking period).
+- API hardening checks: validation errors, page size caps, error hygiene, body limits, and CORS.
+
+You can rerun it against a running stack with the same environment that `startup.sh` exports
+(`API_URL`, `APP_ORIGIN`, `RPC_URL`, the test agent URL, and the contract addresses including
+`TREASURY_ADDRESS`).
+
+## Working on a single component
+
+<Tabs items={['Contracts', 'API', 'SDK', 'App']}>
+  <Tab value="Contracts">
+    ```bash
+    cd verora-contracts
+    forge install
+    forge build
+    forge test        # unit, integration, regression, and invariant tests
+    forge fmt --check
+    ```
+
+    After changing a contract, regenerate the ABIs used by the API, SDK, and app:
+
+    ```bash
+    node script/export-abis.mjs ../verora-api/src/chain/abis.ts ../verora-sdk/src/abis.ts ../verora-app/src/config/abis.ts
+    ```
+  </Tab>
+  <Tab value="API">
+    Copy `verora-api/.env.example` to `.env` and fill in the addresses from the deployment manifest. The
+    API refuses to start if any variable is missing or malformed. See [Configuration](/docs/reference/configuration).
+  </Tab>
+  <Tab value="SDK">
+    ```bash
+    cd verora-sdk
+    pnpm install
+    pnpm typecheck && pnpm lint && pnpm test && pnpm build
+    pnpm example:full-flow   # against a local stack started with ./startup.sh
+    ```
+  </Tab>
+  <Tab value="App">
+    The app reads `NEXT_PUBLIC_*` variables at build time and refuses to start if a contract address is
+    missing or malformed. Copy `verora-app/.env.example` to `.env.local` and fill in the addresses.
+  </Tab>
+</Tabs>

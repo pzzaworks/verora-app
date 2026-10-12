@@ -1,0 +1,85 @@
+---
+title: Deploying the Contracts
+description: Deploy and wire the Verora contracts with the Foundry deploy script, hand ownership to a multisig, and point the API, SDK, and app at the result.
+icon: Upload
+---
+
+`verora-contracts/script/Deploy.s.sol` deploys all six contracts, wires their permissions, optionally
+starts an ownership transfer, and writes `deployments/<chainId>.json`, which the API, SDK, and app consume.
+
+## Configure
+
+The signer comes from the forge CLI (`--account <keystore>`, `--ledger`, or `--private-key` for local
+Anvil only), never from an environment variable. Everything else is read from the environment:
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `FINALIZER` | Yes | - | Oracle address authorized to finalize queries. It only needs gas and must not be the owner. |
+| `OWNER` | No | Deployer | Final owner of every contract, for example a multisig. |
+| `MIN_STAKE` | No | `0.01 ether` | Minimum ETH per `stake()` call, in wei. |
+| `UNSTAKING_PERIOD` | No | `7 days` | Unbonding period in seconds (at most 30 days). |
+| `MIN_PAYMENT_PER_AGENT` | No | `0.0001 ether` | Minimum query payment per assigned agent, in wei. |
+
+## Deploy
+
+```bash
+# One-time: import the deployer key into an encrypted keystore
+cast wallet import verora-deployer --interactive
+
+export SEPOLIA_RPC_URL=https://...   # Ethereum Sepolia RPC endpoint
+export ETHERSCAN_API_KEY=...         # for source verification on Etherscan
+export FINALIZER=0x...               # oracle signer address (needs gas only)
+export OWNER=0x...                   # optional: multisig that becomes owner (must acceptOwnership)
+
+forge script script/Deploy.s.sol:Deploy \
+  --rpc-url sepolia --account verora-deployer --broadcast --verify
+```
+
+`foundry.toml` defines the `sepolia` RPC alias (from `SEPOLIA_RPC_URL`) and Etherscan verification for
+chain 11155111 (from `ETHERSCAN_API_KEY`).
+
+## What the script does
+
+<Steps>
+  <Step>
+    **Deploys** in dependency order: `Treasury`, `AgentRegistry`, `StakingPool`, `ReputationManager`,
+    `PaymentRouter`, `QueryConsumer`. The deployer is the initial owner of each.
+  </Step>
+  <Step>
+    **Wires permissions:**
+
+    - `AgentRegistry.setAuthorizedSlasher(stakingPool, true)` so slashing a pool marks the agent `Slashed`.
+    - `ReputationManager.setAuthorizedRecorder(queryConsumer, true)` so settlement records outcomes.
+    - `PaymentRouter.setQueryConsumer(queryConsumer)` so only the `QueryConsumer` can route payments.
+    - `QueryConsumer.setAuthorizedFinalizer(FINALIZER, true)` so the oracle can finalize queries.
+  </Step>
+  <Step>
+    **Transfers ownership** to `OWNER` if it differs from the deployer. Every contract uses `Ownable2Step`,
+    so `OWNER` must call `acceptOwnership()` on each of the six contracts before it controls them.
+  </Step>
+  <Step>
+    **Writes the manifest** `deployments/<chainId>.json` with `chainId`, `startBlock`, `owner`,
+    `finalizer`, and the six contract addresses, and logs the addresses.
+  </Step>
+</Steps>
+
+<Callout title="Two-step ownership" type="warn">
+  Until `OWNER` accepts ownership, the deployer remains the owner of every contract. Accept on all six
+  contracts and verify with `owner()` before treating the deployment as handed over.
+</Callout>
+
+## Point the stack at it
+
+| Consumer | How it reads the deployment |
+| --- | --- |
+| API | `AGENT_REGISTRY_ADDRESS`, `QUERY_CONSUMER_ADDRESS`, `STAKING_POOL_ADDRESS`, `REPUTATION_MANAGER_ADDRESS`, `PAYMENT_ROUTER_ADDRESS`, `START_BLOCK` (the manifest's `startBlock`), `CHAIN`, and `ORACLE_PRIVATE_KEY` for the `FINALIZER` address. |
+| SDK | `parseDeployment(manifest)` with the manifest JSON. |
+| App | `NEXT_PUBLIC_CHAIN` and the five `NEXT_PUBLIC_*_ADDRESS` variables. |
+
+On startup the oracle checks that its signer is an authorized finalizer. If it isn't, it logs a warning
+and keeps relaying responses, but queries can then only settle through expiry.
+
+## Network
+
+The public network is Ethereum Sepolia (chain 11155111); its addresses are listed in
+[Deployments](/docs/reference/deployments). Mainnet requires an external audit first.

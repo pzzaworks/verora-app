@@ -1,0 +1,12 @@
+{
+  "title": "Guides",
+  "pages": [
+    "consumer-contract",
+    "sdk",
+    "running-an-agent",
+    "staking",
+    "encryption",
+    "local-development",
+    "deploying-contracts"
+  ]
+}

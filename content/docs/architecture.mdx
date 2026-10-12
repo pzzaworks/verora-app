@@ -1,0 +1,145 @@
+---
+title: Architecture
+description: Verora separates on-chain state (source of truth), the Verora API (indexer, oracle, and metadata host), and AI agents (off-chain compute).
+icon: Shield
+---
+
+```mermaid
+flowchart TB
+    subgraph Clients
+        App[App / SDK]
+        Consumer[Consumer contracts]
+    end
+    subgraph Chain[Smart contracts - source of truth]
+        AR[AgentRegistry]
+        QC[QueryConsumer]
+        SP[StakingPool]
+        PR[PaymentRouter]
+        RM[ReputationManager]
+        T[Treasury]
+    end
+    subgraph API[Verora API]
+        IDX[Indexer]
+        ORC[Oracle]
+        META[Metadata host]
+        REST[REST API]
+        DB[(Postgres)]
+    end
+    Agents[AI agents - HTTPS endpoints]
+
+    App -->|transactions| Chain
+    Consumer -->|createQuery| QC
+    App -->|reads, SIWE, metadata upload| REST
+    IDX -->|events and state| Chain
+    IDX --> DB
+    REST --> DB
+    META --> DB
+    ORC -->|POST query| Agents
+    ORC -->|submitResponseFor, finalizeQuery, failExpiredQuery| QC
+    ORC --> DB
+    IDX -->|metadata, health| Agents
+```
+
+<Cards>
+  <Card title="Smart Contracts" description="The single source of truth. Agent registrations, staking positions, query escrow and lifecycle, reputation, and payment routing all live on-chain." />
+  <Card title="Verora API" description={<>Indexes contract events into a database for fast reads, hosts agent metadata, and runs the oracle: it delivers queries to agents, verifies their signed answers, relays them with <code>submitResponseFor()</code>, and settles or expires queries. It can't forge answers or move funds outside these rules.</>} />
+  <Card title="AI Agents" description="HTTP endpoints that perform off-chain AI computation. They receive queries (decrypting them when encrypted), answer, and sign the answer with the owner wallet. They are registered on-chain and can be backed by stakers." />
+  <Card title="App / SDK" description="Send transactions to the contracts directly, encrypt and decrypt in the client, and read indexed data such as agent lists, metadata, health, and staking statistics from the API." />
+</Cards>
+
+## Smart contracts
+
+Six contracts hold all protocol state and value. The `QueryConsumer` is the hub: it escrows payments,
+accepts signed responses, and on settlement calls the `ReputationManager` and `PaymentRouter`, which in
+turn feeds the `StakingPool` and the `Treasury`. The [deploy script](/docs/guides/deploying-contracts)
+wires the permissions between them, and each contract has its own page under Reference.
+
+All contracts are Solidity `^0.8.28` (compiled with 0.8.28, `via_ir`, Cancun EVM), built with Foundry and
+OpenZeppelin, and MIT licensed. Every contract with an owner uses `Ownable2Step`. Source lives in
+`verora-contracts/src`.
+
+```mermaid
+flowchart LR
+    QC[QueryConsumer] -->|isActiveAgent, getAgent| AR[AgentRegistry]
+    QC -->|recordSuccess, recordFailure| RM[ReputationManager]
+    QC -->|processPayment| PR[PaymentRouter]
+    QC -->|onQueryFulfilled, onQueryFailed| VC[VeroraConsumer contracts]
+    PR -->|distributeRewards| SP[StakingPool]
+    PR -->|platform fee| T[Treasury]
+    SP -->|slashAgent| AR
+    SP -->|slashed ETH, orphaned rewards| T
+    RM -->|agentExists| AR
+```
+
+### Shared conventions
+
+- **Pausing** (`AgentRegistry`, `QueryConsumer`, `StakingPool`) only blocks new entries: registrations, query creation, and new stakes. Every exit path (responses, settlement, refunds, unstaking, withdrawals) keeps working while paused.
+- **Pull payments.** Agent fees and failed refund pushes (sent with a 30,000 gas cap) are credited and withdrawn by the recipient, so one recipient that rejects ETH can't block settlement for others.
+- **Settlement never depends on agent status.** Finalization, expiry, payment, and reputation only require that agents exist, so suspending or slashing an agent can't lock requester funds.
+- **Custom errors.** All contracts revert with custom errors. The SDK decodes them into readable messages.
+
+## Verora API
+
+A NestJS service backed by Postgres (via Prisma). One process runs four parts:
+
+| Part | What it does |
+| --- | --- |
+| Indexer | Polls contract logs every 2 seconds in ranges of up to 2000 blocks, only for blocks at least `CONFIRMATIONS` deep. It persists its cursor, re-reads contract state at the batch's block, and upserts, so restarts resume cleanly and replays are harmless. |
+| Oracle | Every 3 seconds, delivers due dispatches to agents and settles ready queries. All work is driven by database state written by the indexer, so it resumes after restarts and never depends on in-memory timers. |
+| Agent workers | Resolve metadata for agents whose URI changed (every 10 seconds) and probe agent health (every minute). |
+| REST API | Read-only views over the indexed data, plus SIWE sign-in and metadata hosting. |
+
+## Data flow of a query
+
+<Steps>
+  <Step>
+    **Create.** A requester calls `createQuery()` with ETH. The payment is held in escrow and
+    `QueryCreated` is emitted.
+  </Step>
+  <Step>
+    **Index.** Once the block is `CONFIRMATIONS` deep, the indexer stores the query and one dispatch per
+    assigned agent.
+  </Step>
+  <Step>
+    **Deliver.** The oracle POSTs the query to each agent endpoint and receives `responseData` plus the
+    owner's EIP-712 signature.
+  </Step>
+  <Step>
+    **Relay.** The oracle verifies the signature and calls `submitResponseFor()`. The contract checks the
+    signature again, so the oracle cannot forge or alter answers.
+  </Step>
+  <Step>
+    **Settle.** When all dispatches are done or the deadline has passed, the oracle calls
+    `finalizeQuery()` with the aggregated result and the responders it accepts. Accepted responders are
+    paid and earn a success, rejected ones are unpaid and get a failure, and non-responders get a failure
+    once the deadline has passed. If nobody answered, it calls `failExpiredQuery()` after the deadline
+    and the payment is refunded.
+  </Step>
+  <Step>
+    **Callback.** If the requester is a contract, it receives the result via `onQueryFulfilled()`, or
+    `onQueryFailed()` after a refund when the query failed.
+  </Step>
+</Steps>
+
+See [Query Lifecycle](/docs/reference/query-lifecycle) for the exact states and the oracle's retry rules.
+
+## AI agents
+
+Agents are independent HTTPS services run by their owners. They hold two secrets: the owner key that signs
+answers and, optionally, an X25519 secret key for encrypted queries. See
+[Running an Agent](/docs/guides/running-an-agent).
+
+## App and SDK
+
+The app (Next.js, wagmi) and the SDK (viem) talk to the contracts directly for every write, do all
+encryption and decryption client-side, and use the API only for indexed reads, metadata hosting, and
+SIWE sessions. Contract addresses come from the deployment manifest; there are no built-in addresses.
+
+## Failure independence
+
+| If this fails | What still works |
+| --- | --- |
+| The oracle | Agent owners answer with `submitResponse()`; anyone closes expired queries with `failExpiredQuery()` (queries with responses after a 1 hour grace period, paying every responder); all refunds and withdrawals. Only `finalizeQuery` needs an authorized finalizer. |
+| The indexer or database | All contract interactions. Reads fall back to the chain (the SDK reads queries, responses, stakes, and fees directly from the contracts). |
+| An agent | Other assigned agents still answer and get paid; with no answers, the requester is refunded at the deadline. |
+| Agent status changes | Settlement, payment, and reputation only require that agents exist, so suspensions and slashes never lock funds. |

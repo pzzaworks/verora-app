@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+/*
+ * Relace-Style Theme for Verora
+ * ==============================
+ * Color Palette:
+ * - Cream Background: #fffef2
+ * - Amber/Gold Accent: #fcaa2d
+ * - Dark Text: #191918
+ * - Muted Gray: #898981
+ * - Border Gray: #e8e7df
+ * - Light Button: #f0efe6
+ *
+ * Typography:
+ * - Headers: Syne (geometric display)
+ * - Accent: Playfair Display Italic
+ */
+
+@theme inline {
+  --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
+
+  /* Relace-style colors */
+  --color-cream: #fffef2;
+  --color-amber: #fcaa2d;
+  --color-amber-hover: #e99a20;
+  --color-dark: #191918;
+  --color-muted: #898981;
+  --color-border: #e8e7df;
+  --color-light-btn: #f0efe6;
+  --color-light-btn-hover: #e5e4db;
+  --color-logo-gray: #c8c8c0;
+}
+
+@layer base {
+  * {
+    @apply border-[var(--color-border)];
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-[var(--color-cream)] text-[var(--color-dark)] antialiased;
+    font-family: var(--font-sans), system-ui, sans-serif;
+  }
+  button, [role="button"] {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+::selection {
+  background: rgba(252, 170, 45, 0.3);
+}
+
+/* Strikethrough effect - Relace style */
+.strikethrough {
+  position: relative;
+  display: inline;
+}
+.strikethrough::after {
+  content: '';
+  position: absolute;
+  left: -2%;
+  right: -2%;
+  top: 52%;
+  height: 2.5px;
+  background: var(--color-dark);
+  transform: rotate(-1.5deg);
+}
+
+/* Button styles */
+.btn-primary {
+  @apply inline-flex items-center gap-2.5 px-5 py-3 rounded-lg font-medium text-[13px] tracking-[0.01em] transition-colors;
+  background: var(--color-amber);
+  color: var(--color-dark);
+}
+.btn-primary:hover {
+  background: var(--color-amber-hover);
+}
+
+.btn-secondary {
+  @apply inline-flex items-center gap-2.5 px-5 py-3 rounded-lg font-medium text-[13px] tracking-[0.01em] transition-colors;
+  background: var(--color-light-btn);
+  color: var(--color-dark);
+}
+.btn-secondary:hover {
+  background: var(--color-light-btn-hover);
+}
+
+/* Card styles */
+.card {
+  @apply p-5 rounded-lg border transition-colors;
+  background: white;
+  border-color: var(--color-border);
+}
+.card:hover {
+  border-color: #d0cfca;
+}
+
+/* Section label */
+.section-label {
+  @apply text-[13px] tracking-[0.15em] uppercase mb-3;
+  color: var(--color-muted);
+}
+
+/* Muted text */
+.text-muted {
+  color: var(--color-muted);
+}

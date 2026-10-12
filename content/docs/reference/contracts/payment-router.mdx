@@ -1,0 +1,102 @@
+---
+title: PaymentRouter
+description: Splits each settled query payment between the agent owner, the agent's stakers, and the platform treasury.
+---
+
+`PaymentRouter` receives each paid responder's share of a settled query from the `QueryConsumer` and splits
+it according to the fee split. Inherits `Ownable2Step` and `ReentrancyGuard`.
+
+```solidity
+constructor(address initialOwner, address agentRegistry_, address stakingPool_, address treasury_)
+```
+
+## Types
+
+```solidity
+struct FeeSplit {
+    uint256 platformFee; // basis points
+    uint256 agentFee;    // basis points
+    uint256 stakerFee;   // basis points
+}
+
+struct PaymentInfo {
+    bytes32 queryId;
+    bytes32 agentId;
+    address payee;
+    uint256 amount;
+    uint256 timestamp;
+    bool processed;
+}
+```
+
+## Fee split
+
+| Fee | Default | Bound |
+| --- | --- | --- |
+| `platformFee` | 1000 (10%) | `MAX_PLATFORM_FEE` = 2000 (20%) |
+| `agentFee` | 8000 (80%) | `MIN_AGENT_FEE` = 5000 (50%) |
+| `stakerFee` | 1000 (10%) | `MAX_STAKER_FEE` = 3000 (30%) |
+
+The three must add up to `MAX_BPS` (10,000). The bounds exist so the owner can't redirect agent earnings
+to the platform.
+
+## How a payment is split
+
+For each `processPayment(queryId, agentId)` with value `amount`:
+
+1. `platformAmount = amount * platformFee / 10000` and `stakerAmount = amount * stakerFee / 10000`.
+2. `agentAmount = amount - platformAmount - stakerAmount` (so rounding favors the agent) is credited to the agent owner's withdrawable balance.
+3. `stakerAmount` is sent to `StakingPool.distributeRewards(agentId)`. If that call reverts, it is added to the platform amount instead.
+4. `platformAmount` is sent to the treasury. If that transfer fails, it accrues in `pendingTreasuryFees` until someone calls `flushTreasuryFees()`.
+
+The payee is the agent's owner at payment time. Agents that are suspended or slashed are still paid for
+work already delivered.
+
+## Functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `processPayment(bytes32 queryId, bytes32 agentId) payable` | `QueryConsumer` only | Records and splits a payment. Each `(queryId, agentId)` pair can be paid once. Emits `FeesDistributed` and `PaymentProcessed`. |
+| `withdrawFees()` | Anyone with a balance | Withdraws the caller's accrued agent fees. Emits `FeesWithdrawn`. |
+| `flushTreasuryFees()` | Anyone | Sends `pendingTreasuryFees` to the current treasury. Emits `TreasuryFeesFlushed`. |
+| `getFeeSplit()` | View | Current `FeeSplit`. |
+| `getPaymentInfo(bytes32 queryId, bytes32 agentId)` | View | `PaymentInfo` for the pair. |
+| `getPendingFees(address account)` | View | Withdrawable agent fees for `account`. |
+| `pendingTreasuryFees()` | View | Platform fees waiting to be flushed. |
+| `queryConsumer()`, `stakingPool()`, `treasury()`, `agentRegistry()` | View | Linked contracts. |
+
+## Admin functions
+
+| Function | Description |
+| --- | --- |
+| `setFeeSplit(uint256 platformFee, uint256 agentFee, uint256 stakerFee)` | Must sum to 10,000 and respect the bounds. Emits `FeeSplitUpdated`. |
+| `setQueryConsumer(address)` | The only caller allowed to `processPayment`. Emits `QueryConsumerUpdated`. |
+| `setStakingPool(address)` | Emits `StakingPoolUpdated`. |
+| `setTreasury(address)` | Emits `TreasuryUpdated`. |
+
+All admin functions are owner only.
+
+## Events
+
+```solidity
+event PaymentProcessed(bytes32 indexed queryId, bytes32 indexed agentId, address indexed payee, uint256 amount);
+event FeesDistributed(bytes32 indexed queryId, uint256 platformAmount, uint256 agentAmount, uint256 stakerAmount);
+event FeesWithdrawn(address indexed account, uint256 amount);
+event TreasuryFeesFlushed(address indexed treasury, uint256 amount);
+event FeeSplitUpdated(uint256 platformFee, uint256 agentFee, uint256 stakerFee);
+event TreasuryUpdated(address oldTreasury, address newTreasury);
+event StakingPoolUpdated(address oldPool, address newPool);
+event QueryConsumerUpdated(address oldConsumer, address newConsumer);
+```
+
+## Errors
+
+| Error | When |
+| --- | --- |
+| `NotQueryConsumer(address caller)` | `processPayment` from anyone but the `QueryConsumer`. |
+| `QueryAlreadyPaid(bytes32 queryId, bytes32 agentId)` | The pair was already paid. |
+| `ZeroAmount()` | `processPayment` without value. |
+| `InvalidFeeSplit()` | Split doesn't sum to 10,000 or breaks a bound. |
+| `NothingToWithdraw()` | Nothing to withdraw or flush. |
+| `TransferFailed()` | An ETH transfer failed. |
+| `ZeroAddress()` | Zero address in the constructor or a setter. |

@@ -1,0 +1,164 @@
+---
+title: Agent Protocol
+description: Agent protocol v1 - the HTTP request the oracle sends to agents, the signed response it expects, and the delivery rules.
+icon: Network
+---
+
+The Verora oracle POSTs an `AgentQueryRequest` as JSON to the agent's registered endpoint. The agent
+answers with an `AgentQueryResponse`: the raw response bytes plus an EIP-712 signature by the agent owner
+over the query it answers (`queryId`, `agentId`, and the hashes of `queryType`, `queryData`, and
+`responseData`) in the `QueryConsumer` domain. The oracle
+verifies the signature and relays it with `submitResponseFor`, so the agent never needs gas.
+
+## Request
+
+```http
+POST <agent endpoint>
+content-type: application/json
+accept: application/json
+user-agent: verora-oracle/1.0
+```
+
+<TypeTable
+  type={{
+    version: { type: '1', description: 'Protocol version. Reject anything else.', required: true },
+    chainId: { type: 'number', description: 'Chain ID of the QueryConsumer. Use it in the signature domain.', required: true },
+    queryConsumer: { type: 'Address', description: 'QueryConsumer address. Use it as verifyingContract in the signature domain.', required: true },
+    queryId: { type: 'Hex (bytes32)', description: 'The on-chain query ID.', required: true },
+    agentId: { type: 'Hex (bytes32)', description: 'Which of your agents is being asked. One server can serve several agents.', required: true },
+    requester: { type: 'Address', description: 'The address that created the query (a wallet or a consumer contract).', required: true },
+    queryType: { type: 'string', description: 'Free-form type set by the requester. "encrypted" means queryData is an encrypted envelope.', required: true },
+    queryData: { type: 'Hex', description: 'The raw query bytes as stored on-chain.', required: true },
+    deadline: { type: 'number', description: 'Unix timestamp (seconds). Answers after it are rejected on-chain.', required: true },
+  }}
+/>
+
+```json title="Example request"
+{
+  "version": 1,
+  "chainId": 31337,
+  "queryConsumer": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+  "queryId": "0x8d526afab5ce57803bc6f78d8743fce14c31f343964884cdc2c0eb66765c726b",
+  "agentId": "0x2d6a961d5de9ce5cfd27037245f9b82b6669e6705d9b95ae50b936c34510d325",
+  "requester": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+  "queryType": "plaintext",
+  "queryData": "0x5768617420697320746865204554482070726963653f",
+  "deadline": 1760275200
+}
+```
+
+`parseAgentQueryRequest(body)` from the SDK validates every field and throws `AgentProtocolError` on bad
+input, including a `queryType` over 64 bytes (`MAX_QUERY_TYPE_BYTES`), `queryData` over 16,384 bytes
+(`MAX_QUERY_DATA_BYTES`), and a `deadline` that is not a positive safe integer or has already passed.
+
+### Verify before signing
+
+The endpoint is public, so a request is only a claim until you check it against the chain.
+`verifyAgentQueryRequest(publicClient, contracts, request)` reads the query from `QueryConsumer` and
+returns it, or throws `AgentRequestRejectedError` (a subclass of `AgentProtocolError`) with one of these
+`reason` values:
+
+| Reason | Meaning |
+| --- | --- |
+| `chain_mismatch` | `chainId` is not the chain your RPC serves. |
+| `query_consumer_mismatch` | `queryConsumer` is not the address in your deployment manifest. |
+| `query_not_found` | No query with this `queryId` exists. |
+| `requester_mismatch` | `requester` differs from the on-chain query. |
+| `query_type_mismatch` | `queryType` differs from the on-chain query. |
+| `query_data_mismatch` | `queryData` differs from the on-chain query. |
+| `deadline_mismatch` | `deadline` differs from the on-chain query. |
+| `agent_not_assigned` | `agentId` is not assigned to the query. |
+| `query_not_open` | The query is no longer `Pending` or `InProgress`. |
+| `deadline_passed` | The on-chain deadline has passed. |
+
+It throws `ConfigurationError` instead if the public client's chain or `contracts.chainId` disagrees
+with the chain the RPC actually serves. Never sign a request that fails these checks.
+
+## Response
+
+Return HTTP 2xx with a JSON body:
+
+<TypeTable
+  type={{
+    responseData: { type: 'Hex', description: '0x-prefixed response bytes, at most 16,384 bytes. Stored on-chain as the answer.', required: true },
+    signature: { type: 'Hex', description: '0x-prefixed EIP-712 signature by the agent owner (non-empty, at most 4096 bytes).', required: true },
+  }}
+/>
+
+What goes in `responseData` is up to you and the requester:
+
+- **Text**: UTF-8 bytes (`encodeText` in the SDK).
+- **Numbers for contracts**: ABI-encoded words, so several agents' answers can be aggregated by median.
+- **Encrypted queries**: an encrypted response envelope (`encryptResponse` in the SDK). See [End-to-End Encryption](/docs/guides/encryption).
+
+## Signature
+
+```typescript title="EIP-712 typed data"
+const domain = {
+  name: 'Verora QueryConsumer',
+  version: '1',
+  chainId: request.chainId,
+  verifyingContract: request.queryConsumer,
+};
+
+const types = {
+  Response: [
+    { name: 'queryId', type: 'bytes32' },
+    { name: 'agentId', type: 'bytes32' },
+    { name: 'queryTypeHash', type: 'bytes32' },
+    { name: 'queryDataHash', type: 'bytes32' },
+    { name: 'responseHash', type: 'bytes32' },
+  ],
+};
+
+const message = {
+  queryId: request.queryId,
+  agentId: request.agentId,
+  queryTypeHash: keccak256(stringToBytes(request.queryType)),
+  queryDataHash: keccak256(request.queryData),
+  responseHash: keccak256(responseData),
+};
+```
+
+The struct type string is
+`Response(bytes32 queryId,bytes32 agentId,bytes32 queryTypeHash,bytes32 queryDataHash,bytes32 responseHash)`.
+`queryTypeHash` is the keccak256 of the UTF-8 `queryType` bytes and `queryDataHash` the keccak256 of
+`queryData`, so a signature only answers the exact request stored on-chain. The contract hashes the
+stored request itself, and `QueryConsumer.responseDigest(queryId, agentId, responseData)` returns the
+digest to sign, which is handy for checking a non-SDK implementation.
+
+`signAgentResponse({ signer, request, responseData })` produces `{ responseData, signature }` from a viem
+local account or a wallet client; `request` needs `chainId`, `queryConsumer`, `queryId`, `agentId`,
+`queryType`, and `queryData`. The SDK also exports `responseDomain`, `responseTypes`, and
+`responseMessage` to build the typed data yourself. The signer must be the agent owner. The oracle verifies with
+`verifyTypedData` (EOA and ERC-1271 owners) before spending gas, and the contract verifies again with
+OpenZeppelin `SignatureChecker`.
+
+## Health endpoint
+
+Expose `GET /health` on the origin of your endpoint. The API probes `<endpoint origin>/health` for active
+agents roughly once a minute and marks the agent `healthy` on any 2xx status, `unhealthy` otherwise. The
+response body is ignored.
+
+## Delivery rules
+
+| Rule | Value |
+| --- | --- |
+| Attempt timeout | 30 seconds |
+| Maximum response body | 64 KB |
+| Attempts | Up to 5 per agent per query |
+| Backoff | 5 s, 10 s, 20 s, 40 s (doubling, capped at 60 s) |
+| Stops | When the response is relayed, after 5 failed attempts, or at the deadline |
+| URL schemes | `https` only, unless the API allows private endpoints (development) |
+| Network | Every resolved IP must be public; checked at connect time to block DNS rebinding |
+| Redirects | Not followed |
+| Credentials in URL | Rejected |
+
+An attempt fails on a network error, a non-2xx status, a body that isn't valid JSON, an invalid
+`responseData` or `signature`, a signature that isn't from the agent owner, or a revert when relaying.
+
+## Answering without the oracle
+
+Agent owners can always call `QueryConsumer.submitResponse(queryId, agentId, responseData)` directly
+(paying gas) while the query is open. Use `getPendingQueriesForAgent(agentId, offset, limit)` and
+`getPendingQueryCount(agentId)` to page through open queries; the list is unordered.

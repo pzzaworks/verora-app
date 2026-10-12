@@ -1,0 +1,217 @@
+---
+title: REST API
+description: Endpoints of the Verora API - health, SIWE authentication, agent metadata hosting, and indexed agents, queries, and staking data.
+icon: Server
+---
+
+The Verora API indexes contract events into Postgres and serves them over a read-only REST API, hosts
+agent metadata, and handles Sign-In with Ethereum. It never moves funds: every state change is a
+transaction you sign against the contracts.
+
+When `SWAGGER_ENABLED=true`, interactive OpenAPI docs are served at `/api/docs`. Locally that is
+`http://localhost:4100/api/docs`.
+
+## Conventions
+
+| Topic | Behavior |
+| --- | --- |
+| Format | JSON in and out. Amounts in wei are decimal strings, timestamps are ISO 8601 strings unless noted. |
+| IDs | Agent and query IDs are `0x`-prefixed 32-byte hex, addresses `0x`-prefixed 20-byte hex. They are normalized to lowercase. Malformed IDs return 400. |
+| Pagination | `page` (1 to 10,000, default 1) and `limit` (1 to 100, default 20). Responses are `{ data, page, limit, total }`. |
+| Validation | Unknown query or body fields are rejected with 400. |
+| Authentication | Only `POST /metadata` requires a session: `Authorization: Bearer <token>`. |
+| Rate limits | 120 requests per minute per client by default, stricter where noted. `/` and `/health` are not limited. |
+| CORS | Only origins in `CORS_ORIGINS`, methods `GET` and `POST`. |
+| Body size | JSON bodies up to 1.1 MB (enough for a metadata upload with both images). Larger bodies return 413. |
+
+## Health
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/` | Service banner: `{ "service": "Verora API" }`. |
+| `GET` | `/health` | Database, RPC, and indexer health. Returns 503 when unhealthy. |
+
+```json title="GET /health"
+{
+  "status": "healthy",
+  "timestamp": "2026-10-12T09:30:00.000Z",
+  "checks": {
+    "database": true,
+    "rpc": true,
+    "indexer": { "lastIndexedBlock": "1234", "safeHead": "1234", "lagBlocks": 0, "lastError": null }
+  }
+}
+```
+
+`status` is `unhealthy` if the database or RPC is down, `degraded` if the indexer is more than 100 blocks
+behind, hasn't reported yet, or its last run failed, and `healthy` otherwise.
+
+## Authentication
+
+Sign-In with Ethereum (EIP-4361). Nonces are single-use and stored in the database. Signatures are
+verified through the chain client, which also supports smart contract wallets (ERC-1271 and ERC-6492).
+
+| Method | Path | Rate limit | Description |
+| --- | --- | --- | --- |
+| `GET` | `/auth/nonce` | 20 per minute | Returns `{ "nonce": string }`, valid for 10 minutes. |
+| `POST` | `/auth/verify` | 10 per minute | Body `{ "message": string, "signature": "0x..." }`. Returns `{ "token", "address", "expiresIn" }`. |
+
+The message is rejected (401) unless its domain is in `SIWE_DOMAINS` (when configured), its chain ID
+matches the API's chain, it was issued within the last 10 minutes, it isn't expired or not yet valid,
+the nonce is unused, and the signature is valid. Sessions last one hour (`expiresIn: 3600`).
+
+## Metadata
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `POST` | `/metadata` | Session, 10 per minute | Stores agent metadata. Returns 201 with `{ "id", "uri" }`. |
+| `GET` | `/metadata/:id` | - | The hosted metadata document. `id` is 64 hex characters without `0x`. Cached as immutable. |
+| `GET` | `/assets/:id` | - | A hosted image, served with its detected content type. Cached as immutable. |
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: '1 to 64 characters.', required: true },
+    description: { type: 'string', description: '1 to 1000 characters.', required: true },
+    publicKey: { type: 'string', description: 'Base64 X25519 public key (44 characters) for encrypted queries.' },
+    website: { type: 'string', description: 'https URL, up to 256 characters.' },
+    icon: { type: 'string', description: 'Base64 data URL of a PNG, JPEG, GIF, or WebP image, at most 256 KB.' },
+    banner: { type: 'string', description: 'Base64 data URL of a PNG, JPEG, GIF, or WebP image, at most 512 KB.' },
+  }}
+/>
+
+Image types are detected from the file's magic bytes, not the data URL's declared type, so SVG and other
+formats are rejected. Documents and images are content-addressed by SHA-256, so uploading the same
+content twice returns the same URI. The returned `uri` is `<PUBLIC_BASE_URL>/metadata/<id>`, and images
+are referenced as `<PUBLIC_BASE_URL>/assets/<id>`.
+
+## Agents
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/agents` | Paginated agent list. |
+| `GET` | `/agents/:id` | One agent. 404 if not indexed. |
+
+Query parameters for `GET /agents`:
+
+| Parameter | Values |
+| --- | --- |
+| `status` | `active`, `suspended`, `slashed` |
+| `owner` | Owner address |
+| `capability` | Exact capability tag, 1 to 64 characters |
+| `search` | Case-insensitive search in agent names, 1 to 64 characters |
+| `sort` | `reputation` (default), `stake`, `newest` |
+
+```json title="Agent"
+{
+  "id": "0x...",
+  "owner": "0x...",
+  "endpoint": "https://agent.example.com/query",
+  "capabilities": ["price_feed"],
+  "metadataUri": "https://api.veroraprotocol.com/metadata/...",
+  "metadata": { "name": "Price Oracle", "description": "Crypto prices", "publicKey": "...", "image": "https://..." },
+  "status": "active",
+  "adminSuspended": false,
+  "registeredAt": "2026-10-12T09:30:00.000Z",
+  "reputation": 10000,
+  "totalQueries": 12,
+  "successfulQueries": 12,
+  "failedQueries": 0,
+  "totalStake": "1000000000000000000",
+  "stakerCount": 1,
+  "healthStatus": "healthy",
+  "healthCheckedAt": "2026-10-12T09:29:10.000Z"
+}
+```
+
+`metadata` is the sanitized document (or `null` until resolved or if it can't be resolved), `reputation`
+is in basis points, and `healthStatus` is `unknown`, `healthy`, or `unhealthy`.
+
+## Queries
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/queries` | Paginated query list, newest first. |
+| `GET` | `/queries/stats` | Network statistics. |
+| `GET` | `/queries/:id` | One query with its responses and oracle dispatches. 404 if not indexed. |
+
+Query parameters for `GET /queries`: `requester` (address), `agentId` (assigned agent), and `status`
+(`pending`, `in_progress`, `completed`, `failed`).
+
+```json title="Query detail"
+{
+  "id": "0x...",
+  "requester": "0x...",
+  "queryType": "plaintext",
+  "queryData": "0x...",
+  "status": "completed",
+  "cancelled": false,
+  "payment": "10000000000000000",
+  "deadline": "2026-10-12T09:40:00.000Z",
+  "assignedAgents": ["0x...", "0x..."],
+  "aggregatedResult": "0x...",
+  "createdAt": "2026-10-12T09:30:00.000Z",
+  "finalizedAt": "2026-10-12T09:30:12.000Z",
+  "txHash": "0x...",
+  "responses": [{ "agentId": "0x...", "responseData": "0x...", "submittedAt": "...", "txHash": "0x..." }],
+  "dispatches": [{ "agentId": "0x...", "status": "relayed", "attempts": 1, "lastError": null }]
+}
+```
+
+The list endpoint returns the same fields without `responses` and `dispatches`. Dispatch `status` is
+`pending`, `relayed`, or `failed`.
+
+```json title="GET /queries/stats"
+{
+  "totalQueries": 3,
+  "completedQueries": 2,
+  "failedQueries": 1,
+  "openQueries": 0,
+  "totalVolume": "17000000000000000",
+  "activeAgents": 3,
+  "totalAgents": 3
+}
+```
+
+`openQueries` counts `pending` and `in_progress` queries; `totalVolume` is the sum of all query payments in wei.
+
+## Staking
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/staking/stats` | `{ totalStaked, stakingPositions, rewardsDistributed30d, apy }` across the network. |
+| `GET` | `/staking/agents/:agentId` | `{ agentId, totalStaked, stakerCount, rewardsDistributed30d, apy }` for one agent. |
+| `GET` | `/staking/positions/:address` | Live positions of a staker, 30 per minute. |
+
+`stakingPositions` is the sum of staker counts across agents. `apy` is the trailing 30-day rewards annualized against the current stake, as a percentage with two
+decimals. Positions are read live from the `StakingPool` for every agent the address ever staked on, and
+only positions with shares, unbonding stake, or pending rewards are returned:
+
+```json title="Stake position"
+{
+  "agentId": "0x...",
+  "amount": "1000000000000000000",
+  "shares": "1000000000000000000",
+  "pendingRewards": "500000000000000",
+  "unbondingAmount": "0",
+  "withdrawableAmount": "0",
+  "nextUnlockTime": 0
+}
+```
+
+## Errors
+
+Every error has the same shape:
+
+```json
+{
+  "statusCode": 404,
+  "message": "Agent not found",
+  "error": "Not Found",
+  "timestamp": "2026-10-12T09:30:00.000Z",
+  "path": "/agents/0x..."
+}
+```
+
+`message` is a string, or an array of validation messages. Only messages written for clients are
+exposed; anything unexpected is logged server-side and returned as a generic 500. Common statuses: 400
+(validation), 401 (auth), 404 (not found), 413 (body too large), 429 (rate limited), 503 (unhealthy).

@@ -1,0 +1,69 @@
+---
+title: Deployments
+description: Contract addresses for Ethereum Sepolia, the public Verora network, and for local Anvil development.
+icon: MapPin
+---
+
+The deploy script writes one manifest per chain to `verora-contracts/deployments/<chainId>.json`. Load it
+with `parseDeployment` in the SDK, or copy the addresses into the API and app environment.
+
+## Ethereum Sepolia (chain 11155111)
+
+The public Verora network runs on Ethereum Sepolia. Every address links to Etherscan.
+
+| Contract | Address |
+| --- | --- |
+| `AgentRegistry` | [`0x701A2a74fcc92b3310c5F9c9Fc2dd03c3C6e45cc`](https://sepolia.etherscan.io/address/0x701A2a74fcc92b3310c5F9c9Fc2dd03c3C6e45cc) |
+| `QueryConsumer` | [`0x359b07841C0Add13533D0032187E865290828Cd2`](https://sepolia.etherscan.io/address/0x359b07841C0Add13533D0032187E865290828Cd2) |
+| `StakingPool` | [`0xD60936Bc2E8653340A43Cf711Bd04b3d894B945f`](https://sepolia.etherscan.io/address/0xD60936Bc2E8653340A43Cf711Bd04b3d894B945f) |
+| `ReputationManager` | [`0x390833B00F624d281a10D82F0139E8004f5A428B`](https://sepolia.etherscan.io/address/0x390833B00F624d281a10D82F0139E8004f5A428B) |
+| `PaymentRouter` | [`0x8552f8eb6cbAb35B3e917d17fAa6CCac34f595a8`](https://sepolia.etherscan.io/address/0x8552f8eb6cbAb35B3e917d17fAa6CCac34f595a8) |
+| `Treasury` | [`0x7C95624609896A74C5057353b167A2C55b2151AD`](https://sepolia.etherscan.io/address/0x7C95624609896A74C5057353b167A2C55b2151AD) |
+
+Indexers start reading events at block `11900598`, the block the contracts were deployed in.
+
+Point the app at this network with:
+
+```bash title=".env.local"
+NEXT_PUBLIC_CHAIN=sepolia
+NEXT_PUBLIC_API_URL=https://api.veroraprotocol.com
+NEXT_PUBLIC_AGENT_REGISTRY_ADDRESS=0x701A2a74fcc92b3310c5F9c9Fc2dd03c3C6e45cc
+NEXT_PUBLIC_QUERY_CONSUMER_ADDRESS=0x359b07841C0Add13533D0032187E865290828Cd2
+NEXT_PUBLIC_STAKING_POOL_ADDRESS=0xD60936Bc2E8653340A43Cf711Bd04b3d894B945f
+NEXT_PUBLIC_REPUTATION_MANAGER_ADDRESS=0x390833B00F624d281a10D82F0139E8004f5A428B
+NEXT_PUBLIC_PAYMENT_ROUTER_ADDRESS=0x8552f8eb6cbAb35B3e917d17fAa6CCac34f595a8
+```
+
+Mainnet requires an external security audit first.
+
+## Local (Anvil, chain 31337)
+
+These addresses come from `deployments/31337.json`, produced by `startup.sh` on a fresh Anvil chain with
+the default deployer (Anvil account 0). Because the deployer and its nonce are the same on every fresh
+run, the addresses are the same every time.
+
+| Contract | Address |
+| --- | --- |
+| `Treasury` | `0x5FbDB2315678afecb367f032d93F642f64180aa3` |
+| `AgentRegistry` | `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512` |
+| `StakingPool` | `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0` |
+| `ReputationManager` | `0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9` |
+| `PaymentRouter` | `0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9` |
+| `QueryConsumer` | `0x5FC8d32690cc91D4c39d9d3abcBD16989F875707` |
+
+```json title="deployments/31337.json"
+{
+  "agentRegistry": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "chainId": 31337,
+  "finalizer": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720",
+  "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "paymentRouter": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+  "queryConsumer": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+  "reputationManager": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  "stakingPool": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "startBlock": 13,
+  "treasury": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+}
+```
+
+`startBlock` varies with how many blocks Anvil mined before the deploy; read it from the manifest.

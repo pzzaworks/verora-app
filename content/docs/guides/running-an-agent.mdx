@@ -1,0 +1,324 @@
+---
+title: Running an Agent
+description: Implement the agent endpoint, publish metadata and an encryption key, register on-chain, and withdraw what you earn.
+icon: Bot
+---
+
+An agent is an HTTPS service that the Verora oracle calls with on-chain queries. It answers with the
+response bytes and an EIP-712 signature made by the agent owner's key. The oracle verifies the signature
+and relays it on-chain, so your agent never pays gas.
+
+## Registration flow
+
+<Steps>
+  <Step>
+    An X25519 key pair is generated (the app does this in your browser when you register). The public key
+    goes into the metadata; you configure the secret key on your agent server.
+  </Step>
+  <Step>
+    You sign in with your wallet (SIWE) and the metadata is uploaded to the Verora API, which returns its URI.
+  </Step>
+  <Step>
+    `AgentRegistry.registerAgent()` stores the endpoint, capabilities, and metadata URI on-chain. The
+    registering wallet owns the agent.
+  </Step>
+  <Step>
+    Your endpoint receives queries from the oracle and answers with responses signed by the owner wallet
+    ([agent protocol v1](/docs/reference/agent-protocol)).
+  </Step>
+</Steps>
+
+## 1. Implement the endpoint
+
+Your server needs two routes on the same origin:
+
+- `POST <your endpoint>` - receives an `AgentQueryRequest` JSON body and returns `{ responseData, signature }`.
+- `GET /health` - any 2xx status means healthy. The API probes `<endpoint origin>/health` for active agents about once a minute and shows the result in the app.
+
+The SDK has helpers for every step:
+
+```typescript title="agent.ts"
+import express from 'express';
+import { createPublicClient, http, type Hex } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { sepolia } from 'viem/chains';
+import {
+  decodeText,
+  decryptQuery,
+  encodeText,
+  encryptResponse,
+  fromBase64,
+  parseAgentQueryRequest,
+  parseDeployment,
+  signAgentResponse,
+  verifyAgentQueryRequest,
+  AgentProtocolError,
+} from '@verora/sdk';
+import manifest from './deployments/11155111.json';
+
+// The agent owner's key signs every answer. Load both secrets from your secrets manager.
+const owner = privateKeyToAccount(process.env.AGENT_OWNER_KEY as Hex);
+const encryptionSecretKey = fromBase64(process.env.AGENT_ENCRYPTION_SECRET_KEY ?? '');
+const publicClient = createPublicClient({ chain: sepolia, transport: http(process.env.RPC_URL) });
+const contracts = parseDeployment(manifest);
+
+async function answer(prompt: string): Promise<string> {
+  // Call your model here
+  return `You asked: ${prompt}`;
+}
+
+const app = express();
+app.use(express.json({ limit: '64kb' }));
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'healthy' });
+});
+
+app.post('/query', async (req, res) => {
+  try {
+    const request = parseAgentQueryRequest(req.body);
+    // Reject anything that is not a real, open query assigned to this agent before signing
+    await verifyAgentQueryRequest(publicClient, contracts, request);
+
+    let responseData: Hex;
+    if (request.queryType === 'encrypted') {
+      const { prompt, replyPublicKey } = decryptQuery(request.queryData, encryptionSecretKey);
+      responseData = encryptResponse(await answer(prompt), replyPublicKey);
+    } else {
+      responseData = encodeText(await answer(decodeText(request.queryData)));
+    }
+
+    res.json(await signAgentResponse({ signer: owner, request, responseData }));
+  } catch (error) {
+    // Protocol errors (including AgentRequestRejectedError) are safe to echo back
+    if (error instanceof AgentProtocolError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    // Log the details server-side; never leak internals to callers
+    console.error('Failed to answer query', error);
+    res.status(500).json({ error: 'Failed to answer' });
+  }
+});
+
+app.listen(8080);
+```
+
+`verifyAgentQueryRequest` is what stops forged requests: your endpoint is public, and without the check
+anyone could POST a made-up request and get your owner key to sign an answer they can submit on-chain in
+your agent's name. Always call it before signing. It checks the chain, the `QueryConsumer` address, and
+that the query exists with the same requester, type, data, and deadline, is still open, has not passed
+its deadline, and has your `agentId` assigned. On a mismatch it throws `AgentRequestRejectedError`, whose
+`reason` says which check failed (for example `query_not_found` or `agent_not_assigned`). It extends
+`AgentProtocolError`, so the handler above answers it with a 400. It throws `ConfigurationError` if
+your public client or deployment manifest points at a different chain than the RPC actually serves.
+
+`parseAgentQueryRequest` already rejects malformed bodies, a `queryType` over 64 bytes, `queryData` over
+16,384 bytes, and deadlines that are not positive safe integers or have already passed.
+
+For a complete working example, see the
+[test agent](https://github.com/pzzaworks/verora-sdk/tree/main/examples/test-agent) in the SDK repository.
+It runs several deterministic test agents in one process, each on its own path, and uses the same SDK
+helpers: `parseAgentQueryRequest`, `verifyAgentQueryRequest`, and `signAgentResponse`. Its answers are
+canned test data.
+
+### What the oracle expects
+
+| Requirement | Value |
+| --- | --- |
+| Method | `POST` with a JSON body, `content-type: application/json` |
+| Status | Any 2xx. Anything else counts as a failed attempt. |
+| Timeout | 30 seconds per attempt |
+| Response body | At most 64 KB of JSON |
+| `responseData` | `0x`-prefixed hex, at most 16,384 bytes |
+| `signature` | `0x`-prefixed hex, by the agent owner (EOA or ERC-1271 contract wallet) |
+| URL | `https://` on a public IP address. Redirects are not followed. Private and loopback addresses are only allowed when the API runs with `ALLOW_PRIVATE_AGENT_ENDPOINTS=true` (development only). |
+
+Delivery is attempted up to 5 times in total, with exponential backoff starting at 5 seconds and
+capped at 60 seconds, as long as the query's deadline has not passed. See
+[Agent Protocol](/docs/reference/agent-protocol) for the exact request and signature format.
+
+### Signing
+
+The signature covers the EIP-712 struct
+
+```
+Response(bytes32 queryId,bytes32 agentId,bytes32 queryTypeHash,bytes32 queryDataHash,bytes32 responseHash)
+```
+
+with `queryTypeHash = keccak256(bytes(queryType))`, `queryDataHash = keccak256(queryData)`, and
+`responseHash = keccak256(responseData)`, in the domain
+`{ name: "Verora QueryConsumer", version: "1", chainId, verifyingContract: queryConsumer }`. Binding the
+query type and data means a signature only answers the exact request stored on-chain. Take `chainId`
+and `queryConsumer` from the verified request; `signAgentResponse` builds all of this for you. The
+oracle checks the signature against the agent owner before it spends gas, and `submitResponseFor` checks
+it again on-chain against the hashes the contract stored when the query was created.
+
+<Callout title="The signing key is the owner key" type="warn">
+  The signature must come from the address that owns the agent in the `AgentRegistry`, which is the
+  wallet that registered it. Keep that key in a secrets manager or HSM on the agent server. If you would
+  rather not keep the owner's main wallet key online, register the agent from a dedicated wallet, or own
+  it with an ERC-1271 contract wallet.
+</Callout>
+
+## 2. Create an encryption key pair
+
+Agents that publish an X25519 public key can receive [end-to-end encrypted](/docs/guides/encryption)
+queries. Agents typically use one long-lived key pair:
+
+```typescript
+import { generateEncryptionKeyPair, toBase64 } from '@verora/sdk';
+
+const { publicKey, secretKey } = generateEncryptionKeyPair();
+console.log('publicKey (goes in metadata):', publicKey);
+console.log('secretKey (configure on the server):', toBase64(secretKey));
+```
+
+When you register through the app, it generates the key pair in your browser, publishes only the public
+key, and gives you the secret key to configure on your server. Anyone with the agent's secret key can read
+every encrypted query sent to it.
+
+## 3. Publish metadata
+
+Metadata is a JSON document referenced by the on-chain `metadataURI`. The API resolves and sanitizes it
+and only keeps these fields:
+
+```json title="metadata.json"
+{
+  "name": "PriceFeed Agent",
+  "description": "Real-time crypto price data from multiple DEXs",
+  "publicKey": "base64-encoded-x25519-public-key",
+  "image": "https://api.veroraprotocol.com/assets/<sha256>",
+  "banner": "https://api.veroraprotocol.com/assets/<sha256>",
+  "website": "https://example.com"
+}
+```
+
+| Field | Limit |
+| --- | --- |
+| `name` | 1 to 64 characters |
+| `description` | 1 to 1000 characters |
+| `publicKey` | Base64 X25519 key (44 characters) |
+| `image`, `banner` | URL up to 512 characters, `https://` or the API's own origin |
+| `website` | `https://` URL up to 256 characters |
+
+Fields that break these rules are dropped. Unknown fields are ignored.
+
+<Tabs items={['Hosted by the API', 'Self-hosted']}>
+  <Tab value="Hosted by the API">
+    The API hosts metadata and images so that only a short URI goes on-chain. Sign in with Ethereum
+    first, then upload. Icons are limited to 256 KB and banners to 512 KB, as PNG, JPEG, GIF, or WebP
+    base64 data URLs (SVG is rejected). Documents and images are content-addressed and immutable.
+
+    ```typescript
+    import { sepolia } from 'viem/chains';
+
+    // client and walletClient as in the SDK guide; publicKey from step 2
+    await client.api.signIn(walletClient, {
+      domain: 'veroraprotocol.com', // must be in the API's SIWE_DOMAINS
+      uri: 'https://veroraprotocol.com',
+      chainId: sepolia.id,
+    });
+
+    const { uri } = await client.api.uploadMetadata({
+      name: 'Price Oracle',
+      description: 'Crypto prices',
+      publicKey,
+      website: 'https://example.com',
+      icon: 'data:image/png;base64,...',
+    });
+    ```
+  </Tab>
+  <Tab value="Self-hosted">
+    Serve the JSON yourself from an `https://` URL or an `ipfs://` URI (resolved through the `ipfs.io`
+    gateway). The document must be at most 64 KB and the URL must answer with HTTP 200 without a
+    redirect. The API re-fetches metadata whenever the on-chain URI changes.
+  </Tab>
+</Tabs>
+
+## 4. Register on-chain
+
+<Tabs items={['SDK', 'Solidity / cast']}>
+  <Tab value="SDK">
+    ```typescript
+    const { agentId } = await client.registerAgent({
+      endpoint: 'https://agent.example.com/query',
+      capabilities: ['price_feed'],
+      metadataUri: uri,
+    });
+    ```
+  </Tab>
+  <Tab value="Solidity / cast">
+    ```solidity
+    function registerAgent(
+        string calldata endpoint,
+        string[] calldata capabilities,
+        bytes calldata attestation,
+        string calldata metadataURI
+    ) external returns (bytes32 agentId);
+    ```
+
+    ```bash
+    cast send $AGENT_REGISTRY "registerAgent(string,string[],bytes,string)" \
+      "https://agent.example.com/query" '["price_feed"]' 0x "$METADATA_URI" \
+      --rpc-url $RPC_URL --account my-agent-owner
+    ```
+  </Tab>
+</Tabs>
+
+The new `agentId` is in the `AgentRegistered` event. Registration limits: endpoint 1 to 512 bytes, up to
+32 capabilities of 1 to 64 bytes each, attestation up to 4096 bytes, metadata URI up to 512 bytes.
+Capabilities are free-form tags; the seeded demo agents use `price_feed` and `general`.
+
+## 5. Get paid
+
+Each time a query settles with your answer accepted by the oracle, your share of the payment goes
+through the `PaymentRouter`. Accepted responders split the payment equally (the last one also gets the
+rounding remainder); rejected answers are not paid. By
+default 80% is credited to the agent owner, 10% goes to your stakers, and 10% to the treasury. Withdraw
+whenever you like:
+
+```typescript
+const pending = await client.getPendingFees(ownerAddress);
+await client.withdrawFees();
+```
+
+Withdrawals are pull-based: credits accumulate per owner address across all your agents.
+
+## Manage your agent
+
+| Action | Function | Notes |
+| --- | --- | --- |
+| Change endpoint, capabilities, attestation | `updateAgent(agentId, endpoint, capabilities, attestation)` | Owner only, agent must be `Active`. |
+| Change metadata | `updateMetadataURI(agentId, metadataURI)` | Owner only, any status. |
+| Pause taking queries | `suspendAgent(agentId, reason)` | Owner only, agent must be `Active`. |
+| Resume | `reactivateAgent(agentId)` | Owner only. Fails for slashed agents and for agents suspended by the protocol owner. |
+
+Suspended and slashed agents can't be assigned new queries or receive new stake, but they can still
+answer queries they were assigned before and still get paid when those answers are accepted.
+
+## If the oracle can't reach you
+
+Delivery is best-effort, but the deadline is what counts on-chain. As long as the query is still open
+you can submit an answer yourself as the agent owner, paying gas:
+
+```solidity
+QueryConsumer.submitResponse(bytes32 queryId, bytes32 agentId, bytes calldata responseData)
+```
+
+`QueryConsumer.getPendingQueriesForAgent(agentId, offset, limit)` returns one page of the queries still
+waiting on your agent and `getPendingQueryCount(agentId)` returns the total. The list is unordered
+(settled queries are swapped out), so page through it with the count rather than relying on positions.
+With the SDK:
+
+```typescript
+const total = await client.getPendingQueryCount(agentId);
+for (let offset = 0; offset < Number(total); offset += 100) {
+  const queryIds = await client.getPendingQueriesForAgent(agentId, { offset, limit: 100 });
+  // ...
+}
+```
+
+An assigned agent that never answers gets a failure recorded in the `ReputationManager` only when the
+query settles after its deadline and its window was at least `minQueryDuration`. If the oracle finalizes
+early, non-responders stay neutral.

@@ -1,0 +1,87 @@
+---
+title: Configuration
+description: Every environment variable of the API, the app, the deploy script, and the local tooling.
+icon: Settings
+---
+
+## API
+
+The API validates its environment on startup and refuses to start if anything required is missing or
+malformed. Copy `verora-api/.env.example` to `.env` to start.
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `NODE_ENV` | No | `development` | `development`, `production`, or `test`. |
+| `PORT` | No | `4100` | HTTP port. |
+| `DATABASE_URL` | Yes | - | `postgres://` or `postgresql://` connection string. |
+| `CHAIN` | Yes | - | `foundry` (local Anvil) or `sepolia` (Ethereum Sepolia). |
+| `RPC_URL` | Yes | - | `http`, `https`, `ws`, or `wss` RPC URL. |
+| `AGENT_REGISTRY_ADDRESS` | Yes | - | From the deployment manifest. |
+| `QUERY_CONSUMER_ADDRESS` | Yes | - | From the deployment manifest. |
+| `STAKING_POOL_ADDRESS` | Yes | - | From the deployment manifest. |
+| `REPUTATION_MANAGER_ADDRESS` | Yes | - | From the deployment manifest. |
+| `PAYMENT_ROUTER_ADDRESS` | Yes | - | From the deployment manifest. |
+| `START_BLOCK` | No | `0` | Deployment block (`startBlock` in the manifest). The indexer starts here on an empty database. |
+| `CONFIRMATIONS` | No | `3` | Blocks to wait before indexing, to stay clear of reorgs (0 to 256). 0 is fine on local Anvil. |
+| `ORACLE_ENABLED` | No | `true` | Runs the oracle loop. |
+| `ORACLE_PRIVATE_KEY` | When the oracle is enabled | - | Key of the `FINALIZER` address. Only needs gas; never use the contract owner's key. |
+| `JWT_SECRET` | Yes | - | Session signing secret, at least 32 characters (for example `openssl rand -hex 32`). |
+| `PUBLIC_BASE_URL` | Yes | - | Public URL of the API, used to build metadata and asset URLs. |
+| `CORS_ORIGINS` | In production | empty | Comma-separated browser origins allowed by CORS. |
+| `SIWE_DOMAINS` | In production | empty | Comma-separated `host[:port]` values accepted in SIWE messages. When empty, any domain is accepted. |
+| `SWAGGER_ENABLED` | No | `false` | Serves interactive API docs at `/api/docs`. |
+| `ALLOW_PRIVATE_AGENT_ENDPOINTS` | No | `false` | Development only: lets the oracle and health checks call agents on private or loopback addresses over `http`. Rejected when `NODE_ENV=production`. |
+| `TRUST_PROXY_HOPS` | No | `0` | Number of reverse proxies in front of the API, for correct client IPs in rate limiting (0 to 10). |
+
+Boolean variables accept `true` or `1`.
+
+<Callout title="Production checks" type="warn">
+  With `NODE_ENV=production` the API also refuses to start when `ALLOW_PRIVATE_AGENT_ENDPOINTS` is true or
+  when `CORS_ORIGINS` or `SIWE_DOMAINS` is empty.
+</Callout>
+
+## App
+
+All values are public and inlined at build time. The app refuses to start if a contract address is
+missing or malformed. See `verora-app/.env.example`.
+
+| Variable | Description |
+| --- | --- |
+| `NEXT_PUBLIC_CHAIN` | Target network: `foundry` (local Anvil) or `sepolia` (Ethereum Sepolia). |
+| `NEXT_PUBLIC_RPC_URL` | Dedicated RPC endpoint (recommended on public networks). Defaults to the chain's public RPC. |
+| `NEXT_PUBLIC_API_URL` | Verora API base URL, for example `https://api.veroraprotocol.com`. |
+| `NEXT_PUBLIC_SITE_URL` | Optional public origin of the app, used for canonical URLs, the sitemap, and social cards. Defaults to `https://veroraprotocol.com`. |
+| `NEXT_PUBLIC_AGENT_REGISTRY_ADDRESS` | From the deployment manifest. |
+| `NEXT_PUBLIC_QUERY_CONSUMER_ADDRESS` | From the deployment manifest. |
+| `NEXT_PUBLIC_STAKING_POOL_ADDRESS` | From the deployment manifest. |
+| `NEXT_PUBLIC_REPUTATION_MANAGER_ADDRESS` | From the deployment manifest. |
+| `NEXT_PUBLIC_PAYMENT_ROUTER_ADDRESS` | From the deployment manifest. |
+
+## Deploy script
+
+Read by `verora-contracts/script/Deploy.s.sol`. The signer always comes from the forge CLI.
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `FINALIZER` | Yes | - | Oracle address authorized to finalize queries. |
+| `OWNER` | No | Deployer | Final owner of every contract (two-step transfer). |
+| `MIN_STAKE` | No | `10000000000000000` (0.01 ETH) | Minimum stake per call, in wei. |
+| `UNSTAKING_PERIOD` | No | `604800` (7 days) | Unbonding period in seconds, at most 30 days. |
+| `MIN_PAYMENT_PER_AGENT` | No | `100000000000000` (0.0001 ETH) | Minimum payment per assigned agent, in wei. |
+| `SEPOLIA_RPC_URL` | For Sepolia | - | RPC URL behind the `sepolia` alias in `foundry.toml`. |
+| `ETHERSCAN_API_KEY` | For `--verify` | - | Source verification on Etherscan. |
+
+## Local tooling
+
+| Variable | Used by | Default | Description |
+| --- | --- | --- | --- |
+| `VERORA_LOG_DIR` | `startup.sh` | `/tmp/verora` | Where service logs are written. |
+| Test agent settings | Test agent | Port `4102` | Listen port, agent slugs, and each agent's owner and encryption keys. See the [test agent](https://github.com/pzzaworks/verora-sdk/tree/main/examples/test-agent) source for the variable names. |
+| `AGENT_REGISTRY_ADDRESS` | Test agent, smoke test | - | `AgentRegistry` address. |
+| `RPC_URL` | Test agent, smoke test, SDK example | `http://localhost:8545` | Chain RPC. |
+| `API_URL` | Smoke test, SDK example | `http://localhost:4100` | Verora API. |
+| `APP_ORIGIN` | Smoke test, SDK example | `http://localhost:4101` | App origin used for SIWE. |
+| Test agent URL | Smoke test | `http://localhost:4102` | Test agent base URL, exported by `startup.sh`. |
+| `AGENT_ENDPOINT` | SDK example | `http://localhost:4102/alpha/query` | Endpoint registered for the example agent. |
+| `DEPLOYMENT` | SDK example | `../verora-contracts/deployments/31337.json` | Deployment manifest path. |
+| `QUERY_CONSUMER_ADDRESS`, `STAKING_POOL_ADDRESS`, `PAYMENT_ROUTER_ADDRESS`, `TREASURY_ADDRESS` | Smoke test | - | Contract addresses, exported by `startup.sh`. |

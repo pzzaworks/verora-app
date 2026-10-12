@@ -1,0 +1,9 @@
+node_modules
+.next
+.env
+.env.*
+!.env.example
+# .git is kept: the build stage reads docs "Last updated" dates from git history
+.github
+playwright-report
+test-results

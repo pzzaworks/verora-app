@@ -1,0 +1,47 @@
+---
+title: VeroraConsumer
+description: Abstract base contract for contracts that request Verora queries and receive results through the onQueryFulfilled and onQueryFailed callbacks.
+---
+
+`VeroraConsumer` is an abstract contract implementing `IVeroraConsumer`. Inherit it to request queries
+from your contract and receive the aggregated result, or a failure notice, in a callback. See
+[Requesting Queries from a Contract](/docs/guides/consumer-contract) for a walkthrough.
+
+```solidity
+interface IVeroraConsumer {
+    function onQueryFulfilled(bytes32 requestId, bytes calldata result) external;
+    function onQueryFailed(bytes32 requestId) external;
+}
+
+constructor(address queryConsumer_)
+```
+
+## Members
+
+| Member | Visibility | Description |
+| --- | --- | --- |
+| `queryConsumer` | `public immutable` | The `IQueryConsumer` that fulfills requests. |
+| `_pendingRequests` | `internal mapping(bytes32 => bool)` | Request IDs created by this contract that haven't been fulfilled, failed, or cancelled. |
+| `onQueryFulfilled(bytes32 requestId, bytes result)` | `external` | Only callable by `queryConsumer`, only for pending IDs. Clears the pending flag and calls `_onQueryFulfilled`. |
+| `onQueryFailed(bytes32 requestId)` | `external` | Only callable by `queryConsumer`, only for pending IDs. Clears the pending flag and calls `_onQueryFailed`. The payment has already been refunded to this contract (or credited, see below). |
+| `_requestQuery(string queryType, bytes queryData, uint256 deadline, bytes32[] agents) returns (bytes32 requestId)` | `internal` | Calls `queryConsumer.createQuery{value: msg.value}(...)` and marks the ID pending. |
+| `_cancelRequest(bytes32 requestId)` | `internal` | Clears the pending flag and calls `queryConsumer.cancelQuery`. The refund goes to this contract. |
+| `_onQueryFulfilled(bytes32 requestId, bytes result)` | `internal virtual` | Implement this to handle results. |
+| `_onQueryFailed(bytes32 requestId)` | `internal virtual` | Optional hook, empty by default. Override it to release per-request state or account for the refund. |
+| `receive()` | `external payable` | Accepts refunds. |
+
+## Errors
+
+| Error | When |
+| --- | --- |
+| `OnlyQueryConsumer()` | `onQueryFulfilled` or `onQueryFailed` called by anyone but the `QueryConsumer`. |
+| `RequestNotPending(bytes32 requestId)` | Callback or cancel for an ID that isn't pending. |
+
+## Notes
+
+- `_requestQuery` forwards the **whole** `msg.value` of the current call, so call it from a `payable` function and don't spend part of `msg.value` elsewhere in the same call.
+- `onQueryFulfilled` receives an empty `result` for `encrypted` queries and for queries closed by permissionless expiry after the finalizer grace period.
+- `onQueryFailed` runs when a query expires without any answer or the finalizer rejects every response. The refund is sent before the callback, so you can account for it inside `_onQueryFailed`. Cancelling with `_cancelRequest` refunds without a callback.
+- The callback runs with a gas cap (500,000 by default). If it reverts, the query still settles and the callback is not retried.
+- Refunds are pushed with a 30,000 gas cap, which the empty `receive()` easily fits. If you override `receive()` with heavier logic and the push fails, the refund is credited instead: claim it by calling `queryConsumer.withdrawRefund()` from your contract.
+- ETH accumulates in your contract from refunds. Add a withdrawal function, as the `VeroraAISentiment` example does with `withdraw(address payable recipient, uint256 amount)`.

@@ -1,0 +1,80 @@
+---
+title: Query Lifecycle
+description: Every status a query can be in, every transition between them, and who can trigger it.
+icon: Workflow
+---
+
+## Statuses
+
+| Status | Value | API value | Meaning |
+| --- | --- | --- | --- |
+| `Pending` | 0 | `pending` | Created and funded, no responses yet. Can be cancelled by the requester. |
+| `InProgress` | 1 | `in_progress` | At least one response recorded. More assigned agents can still answer until the deadline. |
+| `Completed` | 2 | `completed` | Settled with at least one paid responder. |
+| `Failed` | 3 | `failed` | Cancelled, expired without responses, or every response was rejected by the finalizer. The payment was refunded. |
+
+The API adds a `cancelled` flag to tell a cancelled `failed` query from an expired one.
+
+## Transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: createQuery()
+    Pending --> InProgress: first response
+    InProgress --> InProgress: more responses (before deadline)
+    InProgress --> Completed: finalizeQuery() accepts at least one response
+    InProgress --> Failed: finalizeQuery() rejects every response
+    InProgress --> Completed: failExpiredQuery() after deadline + grace period
+    Pending --> Failed: cancelQuery() by requester
+    Pending --> Failed: failExpiredQuery() after deadline
+    Completed --> [*]
+    Failed --> [*]
+```
+
+| Transition | Function | Who | Condition | Effects |
+| --- | --- | --- | --- | --- |
+| Create | `createQuery` | Anyone | Not paused, valid agents, sizes, and payment, and `now + minQueryDuration <= deadline <= now + 30 days` | Payment escrowed, query added to each agent's pending list, `QueryCreated`. |
+| Respond | `submitResponse` / `submitResponseFor` | Agent owner / anyone with the owner's signature | `Pending` or `InProgress`, before the deadline, assigned, first answer from that agent | Response stored, `Pending` becomes `InProgress`, `ResponseSubmitted`. |
+| Finalize | `finalizeQuery` | Authorized finalizer or owner | `InProgress`, at least one accepted responder | `Completed`, result stored, accepted responders paid equally and credited with a success (unless self-owned), rejected responders unpaid with a failure, `onQueryFulfilled` callback, `QueryFinalized`. |
+| Finalize, nothing accepted | `finalizeQuery` | Authorized finalizer or owner | `InProgress`, empty accepted set | `Failed`, rejected responders get a failure, full refund, `onQueryFailed` callback, `QueryFinalized`. |
+| Expire with responses | `failExpiredQuery` | Anyone | `InProgress`, after `deadline + FINALIZATION_GRACE_PERIOD` (1 hour); earlier reverts with `FinalizationWindowOpen(queryId, opensAt)` | `Completed` with an empty result, every responder paid equally, no reputation success, `onQueryFulfilled` callback, `QueryFinalized`. |
+| Expire without responses | `failExpiredQuery` | Anyone | `Pending`, after the deadline | `Failed`, full refund, `onQueryFailed` callback, `QueryFinalized`. |
+| Cancel | `cancelQuery` | Requester | `Pending` | `Failed`, full refund, no reputation change, no callback, `QueryCancelled`. |
+
+Whenever a query settles after its deadline and its window was at least `minQueryDuration`, every
+assigned agent that never answered gets a reputation failure. Settling before the deadline leaves them
+neutral. Refunds are pushed with a 30,000 gas cap and credited for `withdrawRefund()` if the push fails.
+
+## What the oracle does
+
+The oracle drives most queries to a terminal state on its own. It runs a loop every 3 seconds:
+
+<Steps>
+  <Step>
+    **Dispatch.** The indexer creates one dispatch per assigned agent when it sees `QueryCreated`. The
+    oracle POSTs each due dispatch to the agent (30-second timeout), verifies the signed answer, and relays it with
+    `submitResponseFor`. Failures are retried with exponential backoff (5 seconds, doubling, at most 60
+    seconds) up to 5 attempts, then the dispatch is marked `failed`. Dispatching stops at the deadline.
+  </Step>
+  <Step>
+    **Settle.** A query is ready to settle once its deadline has passed or no dispatch is still pending.
+    The oracle reads the live responses from the chain. With responses, it aggregates them and calls
+    `finalizeQuery` with the result and the responders whose answers it accepted (see
+    [Aggregation](/docs/concepts#aggregation)). Without responses, it waits for the deadline and calls
+    `failExpiredQuery`, treating a `QueryNotExpired` or `FinalizationWindowOpen` revert as "not yet".
+  </Step>
+</Steps>
+
+Deadlines are compared against the latest block time, not wall-clock time. If someone else already moved
+the query forward (for example an agent submitted directly, or anyone expired it), the oracle treats the
+resulting `AlreadyResponded`, `QueryNotPending`, `QueryNotInProgress`, or `QueryExpired` revert as done.
+
+The API exposes each dispatch's `status` (`pending`, `relayed`, `failed`), `attempts`, and `lastError` in
+`GET /queries/:id`, which is the first place to look when an agent didn't answer.
+
+## Timing guidance
+
+- Give agents enough time: a single delivery can take up to 30 seconds, and retries back off up to a minute. The SDK default TTL is 10 minutes.
+- When every assigned agent has answered or failed, the oracle settles right away; it doesn't wait for the deadline.
+- A query must stay open for at least `minQueryDuration` (5 minutes by default). The SDK requires `ttlSeconds` to be at least that plus 60 seconds of inclusion headroom.
+- The longest possible lifetime is 30 days. If the oracle never settles a query with responses, anyone can close it 1 hour after the deadline, so escrow can't be locked indefinitely.

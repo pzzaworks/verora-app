@@ -1,0 +1,252 @@
+---
+title: SDK Reference
+description: The complete public API of @verora/sdk - VeroraClient, VeroraApi, encryption, agent protocol helpers, deployment parsing, constants, and errors.
+icon: Package
+---
+
+```package-install
+npm install @verora/sdk viem
+```
+
+`@verora/sdk` (version 0.1.0) ships ESM and CommonJS builds with type definitions. `viem` (`^2.30.0`) is a peer dependency
+and `tweetnacl` is a regular dependency. Everything below is exported from the package root.
+
+## VeroraClient
+
+Typed client for the Verora contracts plus, optionally, the Verora API. Every write simulates the call
+first, then sends it and waits for the receipt, and throws `TransactionError` if it would revert or did
+revert.
+
+```typescript
+new VeroraClient(config: VeroraClientConfig)
+createVeroraClient(config: VeroraClientConfig): VeroraClient
+```
+
+<TypeTable
+  type={{
+    publicClient: { type: 'PublicClient<Transport, Chain>', description: 'viem public client for the target chain.', required: true },
+    walletClient: { type: 'WalletClient<Transport, Chain, Account>', description: 'Required for writes (registration, queries, staking, withdrawals). Must have an account.' },
+    contracts: { type: 'VeroraContracts', description: 'Contract addresses, usually from parseDeployment(manifest). Validated on construction.', required: true },
+    apiUrl: { type: 'string', description: 'Verora API base URL. Enables client.api.' },
+  }}
+/>
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `publicClient` | `PublicClient` | The client passed in. |
+| `contracts` | `VeroraContracts` | The validated addresses. |
+| `api` | `VeroraApi` | REST client. Throws `ConfigurationError` without `apiUrl`. |
+
+### Agents
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `registerAgent(params: RegisterAgentParams)` | `Promise<{ agentId: Hex; receipt: TransactionReceipt }>` | Calls `registerAgent` and reads `agentId` from the `AgentRegistered` event. |
+| `updateAgent(agentId, endpoint, capabilities, attestation = '0x')` | `Promise<TransactionReceipt>` | Calls `updateAgent`. |
+| `updateMetadataUri(agentId, metadataUri)` | `Promise<TransactionReceipt>` | Calls `updateMetadataURI`. |
+| `suspendAgent(agentId, reason)` | `Promise<TransactionReceipt>` | Calls `suspendAgent`. |
+| `reactivateAgent(agentId)` | `Promise<TransactionReceipt>` | Calls `reactivateAgent`. |
+| `getAgent(agentId)` | `Promise<AgentInfo & { status: AgentStatus; reputation: bigint }>` | Registry record plus status and reputation, read in parallel. |
+| `getAgentsByOwner(owner)` | `Promise<readonly Hex[]>` | Agent IDs registered by `owner`. |
+
+<TypeTable
+  type={{
+    endpoint: { type: 'string', description: 'URL the oracle POSTs queries to.', required: true },
+    capabilities: { type: 'string[]', description: 'Capability tags.', required: true },
+    metadataUri: { type: 'string', description: 'URI of the metadata JSON (see api.uploadMetadata).', required: true },
+    attestation: { type: 'Hex', description: 'Optional TEE attestation bytes.', default: "'0x'" },
+  }}
+/>
+
+These are the fields of `RegisterAgentParams`.
+
+### Queries
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `getMinQueryDuration()` | `Promise<bigint>` | The contract's `minQueryDuration`, in seconds. |
+| `createQuery(params: CreateQueryParams)` | `Promise<{ queryId: Hex; receipt: TransactionReceipt }>` | Sets `deadline = latest block timestamp + ttlSeconds` and sends `payment` as value. Throws `InvalidArgumentError` before sending if `ttlSeconds` is out of bounds. |
+| `createEncryptedQuery(params: CreateEncryptedQueryParams)` | `Promise<{ queryId: Hex; receipt: TransactionReceipt }>` | Encrypts `prompt` for the agent and creates an `encrypted` query assigned to that one agent. |
+| `getQuery(queryId)` | `Promise<QueryInfo>` | On-chain query record. |
+| `getResponses(queryId)` | `Promise<readonly ResponseInfo[]>` | On-chain responses. |
+| `getAggregatedResult(queryId)` | `Promise<Hex>` | Finalized aggregate. |
+| `waitForQuery(queryId, options?: WaitForQueryOptions)` | `Promise<{ query; responses; aggregatedResult }>` | Polls until `Completed` or `Failed`. Throws `QueryTimeoutError`. |
+| `readEncryptedResponses(queryId, keyPair)` | `Promise<EncryptedResponseResult[]>` | Decrypts every response with the requester key. Each entry reports its own outcome, so one bad response never hides the others and the call does not throw for it. |
+| `getPendingQueriesForAgent(agentId, page?: PendingQueriesPage)` | `Promise<readonly Hex[]>` | One page of the agent's open query IDs (`offset` default 0, `limit` default 100). The list is unordered. |
+| `getPendingQueryCount(agentId)` | `Promise<bigint>` | Number of open queries assigned to the agent. |
+| `cancelQuery(queryId)` | `Promise<TransactionReceipt>` | Calls `cancelQuery` (requester only, before any response). |
+| `expireQuery(queryId)` | `Promise<TransactionReceipt>` | Calls `failExpiredQuery`. Throws `FinalizationWindowOpenError` while the finalizer grace period is running. |
+| `getPendingRefund(requester)` | `Promise<bigint>` | Refund credited to `requester` because pushing it failed. |
+| `withdrawRefund()` | `Promise<TransactionReceipt>` | Calls `withdrawRefund` to claim a credited refund. |
+
+<TypeTable
+  type={{
+    queryType: { type: 'string', description: 'Free-form query type, up to 64 bytes.', required: true },
+    queryData: { type: 'Hex', description: 'Query bytes, up to 16,384.', required: true },
+    agents: { type: 'Hex[]', description: '1 to 10 active agent IDs.', required: true },
+    payment: { type: 'bigint', description: 'Payment in wei, split between responding agents.', required: true },
+    ttlSeconds: { type: 'number', description: 'Whole seconds until the deadline. At most 30 days and at least minQueryDuration + DEADLINE_INCLUSION_BUFFER_SECONDS (6 minutes with the default 5 minute minimum).', default: '600' },
+  }}
+/>
+
+These are the fields of `CreateQueryParams`. `CreateEncryptedQueryParams` has `prompt: string`,
+`agentId: Hex`, `agentPublicKey: string` (the agent's X25519 key from its metadata),
+`keyPair: EncryptionKeyPair`, `payment: bigint`, and optional `ttlSeconds`. `WaitForQueryOptions` has
+`timeoutMs` (default 300,000) and `pollIntervalMs` (default 3000). `PendingQueriesPage` has optional
+`offset` (default 0) and `limit` (default 100); a negative offset or non-positive limit throws
+`InvalidArgumentError`.
+
+`EncryptedResponseResult` is one decrypted response:
+
+```typescript
+type EncryptedResponseResult =
+  | { agentId: Hex; ok: true; text: string }
+  | { agentId: Hex; ok: false; error: EncryptionError };
+```
+
+### Staking and payments
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `stake(agentId, amount: bigint)` | `Promise<TransactionReceipt>` | Stakes `amount` wei. |
+| `unstake(agentId, amount: bigint \| 'all')` | `Promise<TransactionReceipt>` | Starts unbonding; `'all'` passes `type(uint256).max`. |
+| `withdrawStake(agentId)` | `Promise<TransactionReceipt>` | Calls `StakingPool.withdraw`. |
+| `claimRewards(agentId)` | `Promise<TransactionReceipt>` | Claims staking rewards. |
+| `getStake(agentId, staker)` | `Promise<StakeInfo>` | Position view. |
+| `getTotalStake(agentId)` | `Promise<bigint>` | Value of active stake. |
+| `getPendingFees(account)` | `Promise<bigint>` | Withdrawable agent fees. |
+| `withdrawFees()` | `Promise<TransactionReceipt>` | Withdraws the connected owner's agent fees. |
+
+### Constants
+
+```typescript
+QueryStatus = { Pending: 0, InProgress: 1, Completed: 2, Failed: 3 }
+AgentStatus = { Inactive: 0, Active: 1, Suspended: 2, Slashed: 3 }
+MAX_QUERY_DURATION_SECONDS = 2_592_000 // 30 days, QueryConsumer.MAX_QUERY_DURATION
+DEADLINE_INCLUSION_BUFFER_SECONDS = 60 // headroom added on top of minQueryDuration by createQuery
+FINALIZATION_GRACE_PERIOD_SECONDS = 3600 // QueryConsumer.FINALIZATION_GRACE_PERIOD
+```
+
+## VeroraApi
+
+Client for the [REST API](/docs/reference/rest-api): indexer reads, SIWE sessions, and metadata hosting.
+Available as `client.api`, or standalone:
+
+```typescript
+new VeroraApi(baseUrl: string, fetchImpl?: typeof fetch)
+```
+
+| Member | Returns | Description |
+| --- | --- | --- |
+| `isSignedIn` | `boolean` | Whether a session token is set. |
+| `setSessionToken(token: string \| null)` | `void` | Uses a token obtained elsewhere. |
+| `signIn(walletClient, options: SignInOptions)` | `Promise<{ token; address; expiresIn }>` | Fetches a nonce, signs an EIP-4361 message, verifies it, and stores the token. |
+| `uploadMetadata(input: MetadataInput)` | `Promise<{ id: string; uri: string }>` | Hosts agent metadata. Requires sign-in. |
+| `listAgents(params?: ListAgentsParams)` | `Promise<Paginated<ApiAgent>>` | `GET /agents`. |
+| `getAgent(agentId)` | `Promise<ApiAgent>` | `GET /agents/:id`. |
+| `listQueries(params?: ListQueriesParams)` | `Promise<Paginated<ApiQuery>>` | `GET /queries`. |
+| `getQuery(queryId)` | `Promise<ApiQueryDetail>` | `GET /queries/:id` with responses and dispatches. |
+| `getNetworkStats()` | `Promise<NetworkStats>` | `GET /queries/stats`. |
+| `getStakingStats()` | `Promise<StakingStats>` | `GET /staking/stats`. |
+| `getAgentStakingStats(agentId)` | `Promise<AgentStakingStats>` | `GET /staking/agents/:agentId`. |
+| `getStakePositions(address)` | `Promise<StakePositionView[]>` | `GET /staking/positions/:address`. |
+
+Non-2xx responses throw `ApiError` with the HTTP `status` and the API's message, or the HTTP status
+text when the error body is not JSON. `getAgent`, `getQuery`, and `getAgentStakingStats` check that the
+ID is a 32-byte hex string and `getStakePositions` checks the address before building the URL; invalid
+input throws `InvalidArgumentError` without a request.
+
+<TypeTable
+  type={{
+    domain: { type: 'string', description: "host[:port] of the app the user signs in to. Must be in the API's SIWE_DOMAINS.", required: true },
+    uri: { type: 'string', description: 'Origin URI of the app, e.g. https://veroraprotocol.com.', required: true },
+    chainId: { type: 'number', description: "Must match the API's chain.", required: true },
+    statement: { type: 'string', description: 'Statement shown in the wallet.', default: "'Sign in to Verora'" },
+  }}
+/>
+
+These are the fields of `SignInOptions`. `MetadataInput` has `name` and `description` (required) and
+optional `publicKey`, `website`, `icon` (base64 data URL, max 256 KB), and `banner` (max 512 KB). The
+response types (`ApiAgent`, `ApiQuery`, `ApiQueryDetail`, `NetworkStats`, `StakingStats`,
+`AgentStakingStats`, `StakePositionView`, `Paginated`) match the [REST API](/docs/reference/rest-api) shapes.
+
+## Encryption
+
+| Export | Description |
+| --- | --- |
+| `ENCRYPTION_KEY_MESSAGE` | The message a wallet signs to derive its encryption key. |
+| `deriveEncryptionKeyPair(signMessage: (message: string) => Promise<Hex>)` | `Promise<EncryptionKeyPair>` from `sha256(signature)`. Deterministic per wallet. |
+| `generateEncryptionKeyPair()` | Random `EncryptionKeyPair`, for agents. |
+| `encryptQuery(prompt, agentPublicKey, replyPublicKey)` | `Hex` `queryData` for an `encrypted` query. |
+| `decryptQuery(queryData, agentSecretKey)` | `{ prompt, replyPublicKey }` (agent side). |
+| `encryptResponse(response, replyPublicKey)` | `Hex` `responseData` (agent side). |
+| `decryptResponse(responseData, secretKey)` | The plaintext answer (requester side). |
+| `encodeText(text)` / `decodeText(data)` | UTF-8 to `Hex` and back, for plaintext queries. |
+| `isValidPublicKey(publicKey)` | Whether a base64 string is a 32-byte key. |
+| `toBase64(bytes)` / `fromBase64(value)` | Base64 helpers. `fromBase64` only accepts standard, padded base64 and throws `EncryptionError` otherwise. |
+
+Types: `EncryptionKeyPair { publicKey: string; secretKey: Uint8Array }`,
+`EncryptedMessage { ciphertext; nonce; ephemeralPublicKey }`, and `EncryptedQuery` (adds `replyPublicKey`).
+
+`decryptQuery` and `decryptResponse` validate every field before decrypting (strict base64, a 24-byte
+nonce, a 32-byte ephemeral key) and report any failure, including a wrong key or a payload that is not
+an encrypted Verora message, as `EncryptionError`.
+
+<Callout type="warn">
+  Only ask users to sign `ENCRYPTION_KEY_MESSAGE` on origins you trust, such as your own app or backend.
+  Anyone who obtains that signature can derive the key pair and read every encrypted answer sent to it.
+</Callout>
+
+## Agent protocol helpers
+
+| Export | Description |
+| --- | --- |
+| `AGENT_PROTOCOL_VERSION` | `1` |
+| `MAX_RESPONSE_BYTES` | `16384` |
+| `MAX_QUERY_DATA_BYTES` | `16384` |
+| `MAX_QUERY_TYPE_BYTES` | `64` |
+| `parseAgentQueryRequest(body: unknown)` | Validates the shape of an oracle request and returns `AgentQueryRequest`. Rejects oversized `queryType` or `queryData`, a deadline that is not a positive safe integer, and a deadline that has already passed. Throws `AgentProtocolError`. |
+| `verifyAgentQueryRequest(publicClient, contracts, request)` | Checks a parsed request against the `QueryConsumer` contract and returns the on-chain query. Throws `AgentRequestRejectedError` (with a `reason`) if it is not a real, open query assigned to that agent, and `ConfigurationError` if the public client's chain or `contracts.chainId` disagrees with the RPC chain. Call it before signing so forged requests are never signed. |
+| `signAgentResponse({ signer, request, responseData })` | `Promise<AgentQueryResponse>`. `signer` is a viem `LocalAccount` or a `WalletClient` with an account; `request` needs `chainId`, `queryConsumer`, `queryId`, `agentId`, `queryType`, and `queryData`. Throws `AgentProtocolError` if `responseData` is not hex or exceeds 16,384 bytes. |
+| `responseDomain(chainId, queryConsumer)` | The EIP-712 domain. |
+| `responseTypes` | The EIP-712 `Response` type. |
+| `responseMessage(request, responseData)` | The EIP-712 `Response` message: `queryId`, `agentId`, and the `queryTypeHash`, `queryDataHash`, and `responseHash` keccak256 hashes. |
+
+Types: `AgentQueryRequest`, `AgentQueryResponse`, `SignAgentResponseParams`, and `SignedRequestFields`
+(the request fields a signature covers). See [Agent Protocol](/docs/reference/agent-protocol).
+
+## Deployment
+
+| Export | Description |
+| --- | --- |
+| `parseDeployment(manifest: unknown)` | Validates a `deployments/<chainId>.json` manifest and returns a `DeploymentManifest` with checksummed addresses. Throws `ConfigurationError`. |
+| `VeroraContracts` | `{ agentRegistry, queryConsumer, stakingPool, paymentRouter, reputationManager, treasury? }` |
+| `DeploymentManifest` | `VeroraContracts` plus `chainId`, `startBlock`, `owner`, `finalizer`, and `treasury`. |
+
+There are no built-in addresses: always pass the manifest of the network you target.
+
+## ABIs
+
+`agentRegistryAbi`, `queryConsumerAbi`, `stakingPoolAbi`, `paymentRouterAbi`, `reputationManagerAbi`, and
+`treasuryAbi` are exported as `const` ABIs generated from the contracts, for full type inference with viem
+or wagmi.
+
+## Errors
+
+| Error | Thrown when |
+| --- | --- |
+| `VeroraError` | Base class of every SDK error. |
+| `ConfigurationError` | Missing or invalid configuration: contract address, API URL, manifest, or session. |
+| `InvalidArgumentError` | An argument is malformed or out of range (for example `ttlSeconds`, a page, an ID, or an address). Nothing was sent. |
+| `WalletNotConnectedError` | A write was attempted without a wallet client or account. |
+| `ApiError` | The API returned a non-success status or an unreadable body. Has `status`. |
+| `TransactionError` | A write would revert (message includes the decoded custom error), reverted, or an expected event was missing. Has optional `errorName` and `errorArgs` when the Verora custom error could be decoded. |
+| `FinalizationWindowOpenError` | Extends `TransactionError`. `expireQuery` was called on a query with responses during the finalizer grace period. Has `queryId` and `opensAt` (`bigint`, unix seconds). |
+| `QueryTimeoutError` | `waitForQuery` timed out. Has `queryId`. |
+| `EncryptionError` | Encrypting or decrypting failed, or a key or payload is invalid. |
+| `AgentProtocolError` | An agent protocol request or response is malformed. |
+| `AgentRequestRejectedError` | Extends `AgentProtocolError`. `verifyAgentQueryRequest` found no matching open query. Has `reason: AgentRequestRejection`. |
+
+`AgentRequestRejection` is one of `'chain_mismatch'`, `'query_consumer_mismatch'`, `'query_not_found'`,
+`'requester_mismatch'`, `'query_type_mismatch'`, `'query_data_mismatch'`, `'deadline_mismatch'`,
+`'agent_not_assigned'`, `'query_not_open'`, or `'deadline_passed'`.

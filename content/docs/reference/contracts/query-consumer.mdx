@@ -1,0 +1,216 @@
+---
+title: QueryConsumer
+description: Query escrow and lifecycle. Creation, signed responses, settlement, expiry, cancellation, refunds, and consumer callbacks.
+---
+
+`QueryConsumer` holds query payments in escrow until a query is finalized, expired, or cancelled.
+Inherits `Ownable2Step`, `Pausable`, `ReentrancyGuard`, and `EIP712("Verora QueryConsumer", "1")`.
+
+```solidity
+constructor(
+    address initialOwner,
+    address agentRegistry_,
+    address reputationManager_,
+    address paymentRouter_,
+    uint256 minPaymentPerAgent_
+)
+```
+
+## Types
+
+```solidity
+enum QueryStatus { Pending, InProgress, Completed, Failed }
+
+struct QueryInfo {
+    bytes32 queryId;
+    address requester;
+    string queryType;
+    bytes queryData;
+    QueryStatus status;
+    uint256 createdAt;
+    uint256 deadline;
+    uint256 payment;
+    bytes32[] assignedAgents;
+}
+
+struct ResponseInfo {
+    bytes32 agentId;
+    bytes responseData;
+    uint256 submittedAt;
+    bool validated; // true only for responses the finalizer accepted
+}
+```
+
+## Constants and settings
+
+| Name | Value |
+| --- | --- |
+| `MIN_RESPONSES` | 1 |
+| `MAX_AGENTS_PER_QUERY` | 10 |
+| `MAX_QUERY_DURATION` | 30 days |
+| `MIN_QUERY_DURATION_FLOOR` / `MIN_QUERY_DURATION_CEILING` | 1 minute / 1 day (bounds for `minQueryDuration`) |
+| `FINALIZATION_GRACE_PERIOD` | 1 hour |
+| `MAX_QUERY_DATA_LENGTH` | 16,384 bytes |
+| `MAX_RESPONSE_DATA_LENGTH` | 16,384 bytes |
+| `MAX_QUERY_TYPE_LENGTH` | 64 bytes |
+| `MAX_CALLBACK_GAS_LIMIT` | 2,000,000 |
+| `MAX_CALLBACK_REASON_LENGTH` | 256 bytes of revert data copied into `CallbackFailed` |
+| `REFUND_GAS_LIMIT` | 30,000 gas forwarded with a pushed refund |
+| `RESPONSE_TYPEHASH` | `keccak256("Response(bytes32 queryId,bytes32 agentId,bytes32 queryTypeHash,bytes32 queryDataHash,bytes32 responseHash)")` |
+| `minQueryDuration` | 5 minutes (owner-settable, 1 minute to 1 day) |
+| `callbackGasLimit` | 500,000 (owner-settable, 1 to 2,000,000) |
+| `minPaymentPerAgent` | Set at deploy (0.0001 ETH by default), owner-settable |
+
+## Requester functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `createQuery(string queryType, bytes queryData, uint256 deadline, bytes32[] agents) payable returns (bytes32 queryId)` | Anyone, not paused | Creates a `Pending` query and escrows `msg.value`. Requires 1 to 10 unique active agents, `now + minQueryDuration <= deadline <= now + 30 days`, size limits, `msg.value > 0`, and `msg.value >= minPaymentPerAgent * agents.length`. Stores `keccak256(bytes(queryType))` and `keccak256(queryData)` for response signatures. Emits `QueryCreated`. |
+| `cancelQuery(bytes32 queryId)` | Requester, status `Pending` | Sets `Failed`, removes the query from pending lists, and refunds the full payment. No reputation is recorded and no callback is made. Emits `QueryCancelled`. |
+| `withdrawRefund()` | Anyone with a credited refund | Withdraws refunds that couldn't be pushed. Emits `RefundWithdrawn`. |
+
+## Agent and oracle functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `submitResponse(bytes32 queryId, bytes32 agentId, bytes responseData)` | Agent owner | Records a response. Emits `ResponseSubmitted`. |
+| `submitResponseFor(bytes32 queryId, bytes32 agentId, bytes responseData, bytes signature)` | Anyone (the oracle) | Records a response authorized by the agent owner's EIP-712 signature over `responseDigest(...)`. Supports EOA and ERC-1271 owners. |
+| `finalizeQuery(bytes32 queryId, bytes aggregatedResult, bytes32[] acceptedAgents)` | Authorized finalizer or owner, status `InProgress` | Settles the query with the responders the finalizer accepted. `acceptedAgents` must be unique and each must have responded (`AgentDidNotRespond`, `DuplicateAgent`). With at least one accepted agent: `Completed`, stores the result, and calls `onQueryFulfilled`. With none: `Failed`, refund, and `onQueryFailed`. Emits `QueryFinalized`. |
+| `failExpiredQuery(bytes32 queryId)` | Anyone, after the deadline, status `Pending` or `InProgress` | Without responses: `Failed`, payment refunded, `onQueryFailed`. With responses: reverts with `FinalizationWindowOpen(queryId, opensAt)` until `deadline + FINALIZATION_GRACE_PERIOD`, then `Completed` with an empty result, every responder paid, no reputation success, `onQueryFulfilled` with empty bytes. Emits `QueryFinalized`. |
+
+A response is accepted only while the query is `Pending` or `InProgress`, before the deadline, from an
+assigned agent that hasn't answered yet, and if it is at most 16,384 bytes. The first response moves the
+query from `Pending` to `InProgress`.
+
+### Settlement
+
+When a query settles (by `finalizeQuery` or `failExpiredQuery`):
+
+1. If the deadline has passed and the query's window (`deadline - createdAt`) was at least the current
+   `minQueryDuration`, every assigned agent that didn't respond gets `ReputationManager.recordFailure`.
+   Finalizing before the deadline leaves non-responders neutral.
+2. The query is removed from every assigned agent's pending list.
+3. **Finalizer path (`finalizeQuery`):** each accepted response is marked `validated` and its agent gets
+   `recordSuccess`, unless the agent's owner is the requester (self-dealing is paid but builds no
+   reputation). Each rejected response is not paid and its agent gets `recordFailure`.
+4. **Permissionless path (`failExpiredQuery` with responses):** every response is paid and no success is
+   recorded, since nobody validated the answers.
+5. Payees split `payment` equally through `PaymentRouter.processPayment`; the last one also gets the
+   rounding remainder. If there are no payees, the payment is refunded instead.
+
+### Refunds
+
+Refunds (cancel, an empty accepted set, or expiry without responses) are pushed to the requester with
+`REFUND_GAS_LIMIT` (30,000) gas. If the push fails, for example because the requester is a contract that
+needs more gas to receive ETH or rejects it, the amount is credited instead and `RefundCredited` is
+emitted. The requester claims it with `withdrawRefund()`; `getPendingRefund(address)` shows the balance.
+
+### Consumer callbacks
+
+If the requester has code, the contract calls it with `callbackGasLimit` gas when a query closes:
+
+- `onQueryFulfilled(queryId, result)` for `Completed` queries (`result` is empty after permissionless expiry).
+- `onQueryFailed(queryId)` for `Failed` queries from `finalizeQuery` or `failExpiredQuery`, after the refund
+  has been sent or credited.
+
+`cancelQuery` makes no callback. The call reverts with `InsufficientGasForCallback` unless at least
+`callbackGasLimit * 64 / 63 + 10000` gas is left, so a caller can't starve the callback and still settle
+the query. A reverting callback emits `CallbackFailed` with at most 256 bytes of revert data; the
+settlement stands.
+
+### Response signatures
+
+```solidity
+digest = _hashTypedDataV4(keccak256(abi.encode(
+    RESPONSE_TYPEHASH,
+    queryId,
+    agentId,
+    keccak256(bytes(queryType)), // queryTypeHash, stored at creation
+    keccak256(queryData),        // queryDataHash, stored at creation
+    keccak256(responseData)      // responseHash
+)));
+```
+
+The domain is `{ name: "Verora QueryConsumer", version: "1", chainId, verifyingContract: address(this) }`.
+`responseDigest(queryId, agentId, responseData)` returns this digest so off-chain code can check it.
+
+## View functions
+
+| Function | Returns |
+| --- | --- |
+| `getQuery(bytes32 queryId)` | `QueryInfo`. Reverts with `QueryNotFound`. |
+| `getResponses(bytes32 queryId)` | `ResponseInfo[]` in submission order. |
+| `getAggregatedResult(bytes32 queryId)` | The finalized result (empty until finalized, for expiry, and for `encrypted` queries). |
+| `getQueriesByRequester(address requester)` | All query IDs created by `requester`. |
+| `getPendingQueriesForAgent(bytes32 agentId, uint256 offset, uint256 limit)` | A page of open query IDs assigned to the agent. Unordered: removals swap in the last entry. Empty when `offset` is past the end. |
+| `getPendingQueryCount(bytes32 agentId)` | Number of open queries assigned to the agent. |
+| `getPendingRefund(address requester)` | Credited refund amount. |
+| `responseDigest(bytes32 queryId, bytes32 agentId, bytes responseData)` | EIP-712 digest to sign. Reverts with `QueryNotFound`. |
+| `minQueryDuration()` | Shortest allowed query window, in seconds. |
+| `callbackGasLimit()`, `minPaymentPerAgent()` | Current settings. |
+| `authorizedFinalizers(address)` | Whether an address may finalize. |
+| `agentRegistry()`, `reputationManager()`, `paymentRouter()` | Linked contracts. |
+
+## Admin functions
+
+| Function | Description |
+| --- | --- |
+| `setAuthorizedFinalizer(address finalizer, bool authorized)` | Grants or revokes the finalizer role. Emits `FinalizerAuthorized`. |
+| `setReputationManager(address)` | The new manager must authorize this contract as a recorder. Emits `ReputationManagerUpdated`. |
+| `setPaymentRouter(address)` | Reverts with `PaymentRouterMismatch` unless the router's `queryConsumer()` is this contract. Emits `PaymentRouterUpdated`. |
+| `setCallbackGasLimit(uint256 gasLimit)` | 1 to 2,000,000. Emits `CallbackGasLimitUpdated`. |
+| `setMinPaymentPerAgent(uint256 minimum)` | Emits `MinPaymentPerAgentUpdated`. |
+| `setMinQueryDuration(uint256 duration)` | 1 minute to 1 day. Raising it also stops failures from being recorded for open queries with a shorter window. Emits `MinQueryDurationUpdated`. |
+| `pause()` / `unpause()` | Pausing blocks `createQuery` only. Responses, finalization, expiry, and refunds keep working. |
+
+All admin functions are owner only.
+
+## Events
+
+```solidity
+event QueryCreated(bytes32 indexed queryId, address indexed requester, string queryType, uint256 payment);
+event ResponseSubmitted(bytes32 indexed queryId, bytes32 indexed agentId, uint256 submittedAt);
+event QueryFinalized(bytes32 indexed queryId, QueryStatus status, bytes aggregatedResult);
+event QueryCancelled(bytes32 indexed queryId, address indexed requester);
+event RefundCredited(address indexed requester, uint256 amount);
+event RefundWithdrawn(address indexed requester, uint256 amount);
+event CallbackExecuted(bytes32 indexed queryId, address indexed consumer, bool success);
+event CallbackFailed(bytes32 indexed queryId, address indexed consumer, bytes reason);
+event FinalizerAuthorized(address indexed finalizer, bool authorized);
+event ReputationManagerUpdated(address oldManager, address newManager);
+event PaymentRouterUpdated(address oldRouter, address newRouter);
+event CallbackGasLimitUpdated(uint256 oldLimit, uint256 newLimit);
+event MinPaymentPerAgentUpdated(uint256 oldMinimum, uint256 newMinimum);
+event MinQueryDurationUpdated(uint256 oldDuration, uint256 newDuration);
+```
+
+## Errors
+
+| Error | When |
+| --- | --- |
+| `InvalidAgentCount(uint256 count)` | 0 or more than 10 agents. |
+| `AgentNotActive(bytes32 agentId)` | An assigned agent isn't `Active` at creation. |
+| `DuplicateAgent(bytes32 agentId)` | The same agent appears twice in `agents` or `acceptedAgents`. |
+| `InvalidDeadline()` | Deadline not in `[now + minQueryDuration, now + 30 days]`. |
+| `PayloadTooLarge()` | `queryType`, `queryData`, or `responseData` over its limit. |
+| `InsufficientPayment(uint256 required, uint256 provided)` | Zero payment or below `minPaymentPerAgent * agents`. |
+| `QueryNotFound(bytes32 queryId)` | Unknown query. |
+| `QueryNotPending(bytes32 queryId)` | Response, cancel, or expiry on a query in the wrong state. |
+| `QueryNotInProgress(bytes32 queryId)` | `finalizeQuery` on a query without responses or already settled. |
+| `QueryExpired(bytes32 queryId)` | Response after the deadline. |
+| `QueryNotExpired(bytes32 queryId)` | `failExpiredQuery` before the deadline. |
+| `FinalizationWindowOpen(bytes32 queryId, uint256 opensAt)` | `failExpiredQuery` on a query with responses before `deadline + FINALIZATION_GRACE_PERIOD`. |
+| `NotAssignedAgent(bytes32 queryId, bytes32 agentId)` | Agent wasn't assigned to the query. |
+| `AgentDidNotRespond(bytes32 queryId, bytes32 agentId)` | `acceptedAgents` contains an agent that didn't respond. |
+| `AlreadyResponded(bytes32 queryId, bytes32 agentId)` | Second response from the same agent. |
+| `NotAgentOwner(bytes32 agentId, address caller)` | `submitResponse` from someone other than the agent owner. |
+| `InvalidSignature()` | `submitResponseFor` signature isn't from the agent owner. |
+| `NotQueryRequester(bytes32 queryId)` | `cancelQuery` from someone other than the requester. |
+| `NotAuthorizedFinalizer(address caller)` | `finalizeQuery` from an unauthorized address. |
+| `InsufficientGasForCallback()` | Not enough gas left to run the consumer callback. |
+| `InvalidCallbackGasLimit(uint256 gasLimit)` | Gas limit 0 or above 2,000,000. |
+| `InvalidMinQueryDuration(uint256 duration)` | `setMinQueryDuration` outside 1 minute to 1 day. |
+| `PaymentRouterMismatch(address paymentRouter)` | `setPaymentRouter` with a router bound to another `QueryConsumer`. |
+| `NothingToWithdraw()` | `withdrawRefund` with no credit. |
+| `TransferFailed()` | Refund withdrawal transfer failed. |
+| `ZeroAddress()` | Zero address in the constructor or a setter. |

@@ -1,0 +1,114 @@
+---
+title: AgentRegistry
+description: ERC-8004-style agent identity registry. Registration, updates, status tracking, and slashing hooks.
+---
+
+`AgentRegistry` implements `IAgentRegistry`, which extends the `IERC8004` agent identity interface.
+Inherits `Ownable2Step`, `Pausable`, and `ReentrancyGuard`.
+
+```solidity
+constructor(address initialOwner)
+```
+
+## Types
+
+```solidity
+enum AgentStatus { Inactive, Active, Suspended, Slashed }
+
+struct AgentInfo {
+    bytes32 agentId;
+    address owner;
+    string endpoint;
+    string[] capabilities;
+    bytes attestation;
+    uint256 registeredAt;
+    string metadataURI;
+}
+```
+
+<TypeTable
+  type={{
+    agentId: { type: 'bytes32', description: 'keccak256(abi.encodePacked(msg.sender, block.timestamp, nonce)) at registration.' },
+    owner: { type: 'address', description: 'The registering wallet. Signs every response and receives agent fees.' },
+    endpoint: { type: 'string', description: 'URL the oracle POSTs queries to.' },
+    capabilities: { type: 'string[]', description: 'Free-form capability tags.' },
+    attestation: { type: 'bytes', description: 'Optional TEE attestation bytes. Stored, not verified on-chain.' },
+    registeredAt: { type: 'uint256', description: 'Registration block timestamp.' },
+    metadataURI: { type: 'string', description: 'URI of the metadata JSON (name, description, images, publicKey, website).' },
+  }}
+/>
+
+## Constants
+
+| Name | Value |
+| --- | --- |
+| `MAX_ENDPOINT_LENGTH` | 512 bytes |
+| `MAX_METADATA_URI_LENGTH` | 512 bytes |
+| `MAX_CAPABILITIES` | 32 |
+| `MAX_CAPABILITY_LENGTH` | 64 bytes |
+| `MAX_ATTESTATION_LENGTH` | 4096 bytes |
+
+## Agent functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `registerAgent(string endpoint, string[] capabilities, bytes attestation, string metadataURI) returns (bytes32 agentId)` | Anyone, not paused | Registers an `Active` agent owned by `msg.sender`. Endpoint must be 1 to 512 bytes, each capability 1 to 64 bytes. Emits `AgentRegistered`. |
+| `updateAgent(bytes32 agentId, string endpoint, string[] capabilities, bytes attestation)` | Agent owner, agent `Active` | Replaces endpoint, capabilities, and attestation. Emits `AgentUpdated`. |
+| `updateMetadataURI(bytes32 agentId, string metadataURI)` | Agent owner, any status | Emits `MetadataURIUpdated`. |
+| `suspendAgent(bytes32 agentId, string reason)` | Agent owner, agent `Active` | Sets `Suspended`. Emits `AgentSuspended`. |
+| `reactivateAgent(bytes32 agentId)` | Agent owner | Sets `Active`. Reverts if the agent is slashed, admin-suspended, or already active. Emits `AgentReactivated`. |
+
+## View functions
+
+| Function | Returns |
+| --- | --- |
+| `getAgent(bytes32 agentId)` | `AgentInfo`. Reverts with `AgentNotFound` for unknown IDs. |
+| `isActiveAgent(bytes32 agentId)` | `true` if the agent exists and is `Active`. |
+| `getAgentStatus(bytes32 agentId)` | `AgentStatus`. Reverts with `AgentNotFound`. |
+| `agentExists(bytes32 agentId)` | Whether the agent exists in any status. |
+| `getAgentsByOwner(address owner)` | All agent IDs registered by `owner`. |
+| `getAgentCount()` | Total number of registered agents. |
+| `getAllAgentIds()` | Every agent ID in registration order. |
+| `getAgentIds(uint256 offset, uint256 limit)` | A page of agent IDs in registration order. |
+| `getAgentAtIndex(uint256 index)` | The agent ID at `index`. Reverts with `Index out of bounds`. |
+| `adminSuspended(bytes32 agentId)` | Whether the protocol owner suspended the agent. |
+| `authorizedSlashers(address)` | Whether an address may call `slashAgent`. |
+
+## Admin and integration functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `slashAgent(bytes32 agentId)` | Authorized slasher or owner | Sets `Slashed`. Idempotent. Called by `StakingPool.slash`. Emits `AgentSlashed`. |
+| `adminSuspendAgent(bytes32 agentId, string reason)` | Owner | Suspends the agent so that its owner can't lift it. Emits `AgentSuspended`. |
+| `adminReactivateAgent(bytes32 agentId)` | Owner | Reactivates a suspended or slashed agent and clears the admin suspension. Emits `AgentReactivated`. |
+| `setAuthorizedSlasher(address slasher, bool authorized)` | Owner | The deploy script authorizes the `StakingPool`. Emits `SlasherAuthorized`. |
+| `pause()` / `unpause()` | Owner | Pausing blocks new registrations only. |
+
+## Events
+
+```solidity
+event AgentRegistered(bytes32 indexed agentId, address indexed owner, string endpoint);
+event AgentUpdated(bytes32 indexed agentId, string endpoint);
+event AgentSuspended(bytes32 indexed agentId, string reason);
+event MetadataURIUpdated(bytes32 indexed agentId, string metadataURI);
+event AgentSlashed(bytes32 indexed agentId);
+event AgentReactivated(bytes32 indexed agentId);
+event SlasherAuthorized(address indexed slasher, bool authorized);
+```
+
+## Errors
+
+| Error | When |
+| --- | --- |
+| `AgentNotFound(bytes32 agentId)` | The agent doesn't exist. |
+| `AgentAlreadyExists(bytes32 agentId)` | ID collision at registration. |
+| `NotAgentOwner(bytes32 agentId, address caller)` | Caller doesn't own the agent. |
+| `AgentNotActive(bytes32 agentId)` | Update or suspend on an agent that isn't `Active`. |
+| `AgentAlreadyActive(bytes32 agentId)` | `reactivateAgent` on an active agent. |
+| `AgentIsSlashed(bytes32 agentId)` | `reactivateAgent` on a slashed agent. |
+| `AgentIsAdminSuspended(bytes32 agentId)` | `reactivateAgent` on an agent the owner suspended. |
+| `InvalidEndpoint()` | Endpoint empty or longer than 512 bytes. |
+| `InvalidCapabilities()` | More than 32 capabilities, or one empty or longer than 64 bytes. |
+| `InvalidAttestation()` | Attestation longer than 4096 bytes. |
+| `InvalidMetadataURI()` | Metadata URI longer than 512 bytes. |
+| `NotAuthorizedSlasher(address caller)` | `slashAgent` from an unauthorized address. |

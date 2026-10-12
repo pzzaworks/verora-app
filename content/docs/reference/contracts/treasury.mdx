@@ -1,0 +1,54 @@
+---
+title: Treasury
+description: Holds platform fees, slashed stake, and unclaimed staker rewards, with owner-controlled distribution.
+---
+
+`Treasury` receives the platform share of every query payment from the `PaymentRouter`, slashed stake
+from the `StakingPool`, and staker rewards for agents that had no active stake. Inherits `Ownable2Step`
+and `ReentrancyGuard`.
+
+```solidity
+constructor(address initialOwner)
+```
+
+ETH is always supported and represented by `ETH_ADDRESS = address(0)`. ERC-20 tokens can be added by the owner.
+
+## Functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `receive()` | Anyone | Accepts ETH and tracks it. Emits `Deposited`. |
+| `deposit() payable` | Anyone | Explicit ETH deposit (non-zero). Emits `Deposited`. |
+| `depositERC20(address token, uint256 amount)` | Anyone | Pulls a supported token with `transferFrom`. Emits `Deposited`. |
+| `distribute(address token, address recipient, uint256 amount)` | Authorized distributor or owner | Pays out from the tracked balance. Emits `Distributed`. |
+| `emergencyWithdraw(address token, uint256 amount, address recipient)` | Owner | Withdraws up to the actual balance. Emits `EmergencyWithdrawal`. |
+| `getBalance(address token)` | View | Actual balance held by the contract. |
+| `getTrackedBalance(address token)` | View | Balance tracked through deposits and distributions. |
+| `getSupportedTokens()` | View | Supported token addresses (including `address(0)` for ETH). |
+| `isTokenSupported(address token)` | View | Whether a token is supported. |
+| `addSupportedToken(address token)` | Owner | Emits `TokenAdded`. |
+| `removeSupportedToken(address token)` | Owner | ETH can't be removed. Emits `TokenRemoved`. |
+| `setAuthorizedDistributor(address distributor, bool authorized)` | Owner | Emits `DistributorAuthorized`. |
+
+## Events
+
+```solidity
+event Deposited(address indexed token, uint256 amount, address indexed source);
+event Distributed(address indexed token, address indexed recipient, uint256 amount);
+event EmergencyWithdrawal(address indexed token, uint256 amount, address indexed recipient);
+event TokenAdded(address indexed token);
+event TokenRemoved(address indexed token);
+event DistributorAuthorized(address indexed distributor, bool authorized);
+```
+
+## Errors
+
+| Error | When |
+| --- | --- |
+| `ZeroAddress()` | Zero token or recipient where not allowed. |
+| `ZeroAmount()` | Zero deposit, distribution, or withdrawal. |
+| `InsufficientBalance(uint256 requested, uint256 available)` | Distributing more than the tracked balance. |
+| `TokenAlreadySupported(address token)` | Adding a token twice. |
+| `TokenNotSupported(address token)` | Depositing or removing an unsupported token, or removing ETH. |
+| `NotAuthorizedDistributor(address caller)` | `distribute` from an unauthorized address. |
+| `TransferFailed()` | An ETH transfer failed. |

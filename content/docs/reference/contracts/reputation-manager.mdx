@@ -1,0 +1,83 @@
+---
+title: ReputationManager
+description: Records one success or failure per agent per query and derives a 0 to 10,000 reputation score with inactivity decay.
+---
+
+`ReputationManager` records query outcomes reported by the `QueryConsumer` and computes each agent's
+reputation. Inherits `Ownable2Step`.
+
+```solidity
+constructor(address initialOwner, address agentRegistry_)
+```
+
+## Types
+
+```solidity
+struct QueryStats {
+    uint256 totalQueries;
+    uint256 successfulQueries;
+    uint256 failedQueries;
+    uint256 lastQueryTimestamp;
+}
+```
+
+## Constants
+
+| Name | Value |
+| --- | --- |
+| `MAX_REPUTATION` | 10,000 (100%) |
+| `INITIAL_REPUTATION` | 5000 (50%) |
+| `DECAY_PERIOD` | 30 days |
+| Decay factor | 500 bps (5%) by default, owner-settable from 0 to 10,000 |
+
+## Score
+
+`getReputation(agentId)` is computed on read:
+
+1. With no recorded queries, the score is `INITIAL_REPUTATION` (5000).
+2. Otherwise the base score is `successfulQueries * 10000 / totalQueries`.
+3. If more than `DECAY_PERIOD` has passed since `lastQueryTimestamp`, the score is reduced by `score * decayFactor / 10000` once per full 30-day period, compounding, for at most 10 periods.
+
+The `QueryConsumer` records outcomes when a query settles:
+
+- **Success:** a responder whose answer the oracle finalizer accepted in `finalizeQuery`, unless the
+  agent's owner is also the requester (self-owned agents are paid but earn no success).
+- **Failure:** a responder whose answer the finalizer rejected.
+- **Failure:** an assigned agent that never responded, but only if the query settles after its deadline
+  and its window (`deadline - createdAt`) was at least `minQueryDuration`. Finalizing early leaves
+  non-responders neutral.
+- **Nothing:** responders paid through permissionless expiry (`failExpiredQuery` after the grace period)
+  get no success, and cancelled queries record nothing.
+
+Each `(agentId, queryId)` pair can be recorded once. Outcomes are recorded for agents in any status, so a status change can't block settlement.
+
+## Functions
+
+| Function | Access | Description |
+| --- | --- | --- |
+| `recordSuccess(bytes32 agentId, bytes32 queryId)` | Authorized recorder or owner | Emits `QueryRecorded` and `ReputationUpdated`. |
+| `recordFailure(bytes32 agentId, bytes32 queryId)` | Authorized recorder or owner | Emits `QueryRecorded` and `ReputationUpdated`. |
+| `getReputation(bytes32 agentId)` | View | Score from 0 to 10,000. |
+| `getQueryStats(bytes32 agentId)` | View | `QueryStats`. |
+| `getDecayFactor()` | View | Decay factor in bps. |
+| `setDecayFactor(uint256 factor)` | Owner | At most 10,000. Emits `DecayFactorUpdated`. |
+| `setAuthorizedRecorder(address recorder, bool authorized)` | Owner | The deploy script authorizes the `QueryConsumer`. Emits `RecorderAuthorized`. |
+| `authorizedRecorders(address)` | View | Whether an address may record outcomes. |
+
+## Events
+
+```solidity
+event ReputationUpdated(bytes32 indexed agentId, uint256 newReputation, uint256 totalQueries);
+event QueryRecorded(bytes32 indexed agentId, bytes32 indexed queryId, bool success);
+event RecorderAuthorized(address indexed recorder, bool authorized);
+event DecayFactorUpdated(uint256 oldFactor, uint256 newFactor);
+```
+
+## Errors
+
+| Error | When |
+| --- | --- |
+| `AgentNotFound(bytes32 agentId)` | Recording for an agent that doesn't exist. |
+| `QueryAlreadyRecorded(bytes32 queryId)` | The outcome for this agent and query was already recorded. |
+| `NotAuthorizedRecorder(address caller)` | Recording from an unauthorized address. |
+| `InvalidDecayFactor(uint256 factor)` | Decay factor above 10,000. |

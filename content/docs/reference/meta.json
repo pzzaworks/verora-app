@@ -1,0 +1,13 @@
+{
+  "title": "Reference",
+  "pages": [
+    "contracts",
+    "query-lifecycle",
+    "fees",
+    "agent-protocol",
+    "sdk",
+    "rest-api",
+    "configuration",
+    "deployments"
+  ]
+}

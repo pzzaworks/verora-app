@@ -1,0 +1,177 @@
+---
+title: Requesting Queries from a Contract
+description: Inherit VeroraConsumer to pay agents from your contract and receive the aggregated answer, or a failure notice, in a callback.
+icon: FileCode
+---
+
+Integrate Verora into your smart contract by inheriting from `VeroraConsumer`. Your contract
+can request AI queries and receive callbacks with the results. A contract that requests queries without
+the base contract must implement both `IVeroraConsumer` callbacks, `onQueryFulfilled` and `onQueryFailed`.
+
+## Install
+
+`VeroraConsumer` lives in `verora-contracts/src/VeroraConsumer.sol` and only depends on the
+`IVeroraConsumer` and `IQueryConsumer` interfaces. Add the [`verora-contracts`](https://github.com/pzzaworks/verora-contracts) repository to your Foundry
+project (for example with `forge install pzzaworks/verora-contracts`, which adds it under `lib/`) and add a
+remapping so the import below resolves:
+
+```text title="remappings.txt"
+verora-contracts/=lib/verora-contracts/
+```
+
+## A minimal consumer
+
+```solidity title="MyDApp.sol"
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {VeroraConsumer} from "verora-contracts/src/VeroraConsumer.sol";
+
+contract MyDApp is VeroraConsumer {
+    constructor(address queryConsumer) VeroraConsumer(queryConsumer) {}
+
+    function askAI(string calldata prompt, bytes32 agentId) external payable returns (bytes32) {
+        bytes32[] memory agents = new bytes32[](1);
+        agents[0] = agentId;
+        // msg.value pays the agents; refunded to this contract if nobody answers in time
+        return _requestQuery("plaintext", bytes(prompt), block.timestamp + 1 hours, agents);
+    }
+
+    function _onQueryFulfilled(bytes32 requestId, bytes calldata result) internal override {
+        // A query closed by permissionless expiry delivers an empty result
+        if (result.length == 0) return;
+        // Handle the AI response
+    }
+
+    function _onQueryFailed(bytes32 requestId) internal override {
+        // Optional: nobody answered or every answer was rejected; the payment is already refunded here
+    }
+}
+```
+
+<Callout title="How it works">
+  1. Your contract inherits `VeroraConsumer` and passes the QueryConsumer address
+  2. Call `_requestQuery()` with the query type, data, deadline, and target agents
+  3. Override `_onQueryFulfilled()` to handle the response when it arrives, and optionally `_onQueryFailed()` for failed queries
+  4. Use `_cancelRequest()` to cancel a request nobody has answered yet
+</Callout>
+
+## What VeroraConsumer gives you
+
+| Member | Description |
+| --- | --- |
+| `queryConsumer` | Immutable address of the `QueryConsumer` passed to the constructor. |
+| `_requestQuery(queryType, queryData, deadline, agents)` | Calls `createQuery` forwarding the **entire `msg.value`**, and marks the returned ID as pending. Must be called from a `payable` function. |
+| `_cancelRequest(requestId)` | Cancels a pending request that has no responses yet. The refund is sent back to your contract. |
+| `_onQueryFulfilled(requestId, result)` | Your hook. Called once per request with the aggregated result. |
+| `_onQueryFailed(requestId)` | Optional hook, empty by default. Called once per failed request, after the payment was refunded. |
+| `onQueryFulfilled(requestId, result)`, `onQueryFailed(requestId)` | The external entry points. Each reverts with `OnlyQueryConsumer` unless called by the `QueryConsumer`, and with `RequestNotPending` for unknown or already handled IDs. |
+| `receive()` | Accepts ETH, so refunds from cancelled or expired requests land in your contract. |
+
+## Request rules
+
+`createQuery` reverts unless all of these hold:
+
+| Rule | Error |
+| --- | --- |
+| 1 to 10 agents, no duplicates | `InvalidAgentCount`, `DuplicateAgent` |
+| Every agent is `Active` | `AgentNotActive` |
+| `block.timestamp + minQueryDuration <= deadline <= block.timestamp + 30 days` | `InvalidDeadline` |
+| `queryType` at most 64 bytes, `queryData` at most 16,384 bytes | `PayloadTooLarge` |
+| `msg.value > 0` and `msg.value >= minPaymentPerAgent * agents.length` | `InsufficientPayment` |
+| Query creation is not paused | `EnforcedPause` |
+
+The deploy script sets `minPaymentPerAgent` to 0.0001 ETH by default. Read the live value with
+`QueryConsumer.minPaymentPerAgent()`. `minQueryDuration` is 5 minutes by default (owner-configurable
+between 1 minute and 1 day); read it with `QueryConsumer.minQueryDuration()`.
+
+## When the callback fires
+
+The `QueryConsumer` calls back the requester only if the requester is a contract, and only in these cases:
+
+| Outcome | Callback | Result bytes |
+| --- | --- | --- |
+| Oracle finalizes with `finalizeQuery` and accepts at least one response | `onQueryFulfilled` | The aggregated result (empty for `encrypted` queries) |
+| Oracle finalizes with `finalizeQuery` but rejects every response | `onQueryFailed` | None. The payment is refunded to your contract first. |
+| Deadline plus the 1 hour finalizer grace period passed with at least one response, closed by `failExpiredQuery` | `onQueryFulfilled` | Empty |
+| Deadline passed with no responses, closed by `failExpiredQuery` | `onQueryFailed` | None. The payment is refunded to your contract first. |
+| You cancelled with `_cancelRequest` | None | The payment is refunded to your contract |
+
+Always handle an empty `result`. The example `VeroraAISentiment` contract checks the exact expected
+length before decoding, and credits the refund of a failed request back to whoever paid for it:
+
+```solidity
+function _onQueryFulfilled(bytes32 requestId, bytes calldata result) internal override {
+    string memory asset = _requestAssets[requestId];
+    delete _requestAssets[requestId];
+    delete _requestPayments[requestId];
+
+    // Expired queries are closed with an empty result; keep the previous value
+    if (result.length != 64) {
+        emit SentimentUnavailable(requestId, asset);
+        return;
+    }
+
+    (int256 score, uint256 confidence) = abi.decode(result, (int256, uint256));
+
+    bytes32 assetHash = keccak256(abi.encodePacked(asset));
+    latestSentiment[assetHash] =
+        SentimentData({score: score, confidence: confidence, updatedAt: block.timestamp, requestId: requestId});
+
+    emit SentimentUpdated(assetHash, asset, score, confidence);
+}
+
+function _onQueryFailed(bytes32 requestId) internal override {
+    emit SentimentUnavailable(requestId, _requestAssets[requestId]);
+    _creditRefund(requestId);
+}
+```
+
+<Callout title="Callback gas and failures" type="warn">
+  The callback runs with `callbackGasLimit` gas (500,000 by default, owner-configurable up to 2,000,000).
+  If it reverts or runs out of gas, the `QueryConsumer` emits `CallbackFailed` and still settles the
+  query: agents are paid (or the requester refunded) and your contract will not be called again for that
+request. Keep callbacks
+  cheap and non-reverting.
+</Callout>
+
+## Getting numeric answers
+
+When several agents answer, the oracle aggregates numeric responses with an element-wise median (see
+[Core Concepts](/docs/concepts#aggregation)). Ask your agents to return ABI-encoded values of a fixed
+size, for example `abi.encode(int256 score, uint256 confidence)` (64 bytes), and decode them with
+`abi.decode` in the callback.
+
+## Refunds
+
+Refunds are pushed to the requester with a 30,000 gas cap. If the push fails, the amount is credited
+instead and the `RefundCredited` event is emitted. A credited refund is withdrawn by the requester with
+`QueryConsumer.withdrawRefund()` (check it with `getPendingRefund(address)`); because the requester is
+your contract, add a function that calls it if your contract can ever reject ETH or spends more than
+30,000 gas receiving it. Contracts that inherit `VeroraConsumer` accept ETH through an empty
+`receive()`, so pushes normally succeed. For failed queries the refund happens before `onQueryFailed`
+runs, so the callback can account for it.
+
+## Full example
+
+`verora-contracts/src/examples/VeroraAISentiment.sol` is a complete consumer: it stores default agents,
+requests `ai_sentiment` queries with `abi.encode(asset)` as the payload, decodes
+`(int256 score, uint256 confidence)` results, credits the payment of failed or cancelled requests back to
+whoever paid (claimable with its own `withdrawRefund()`), and lets the owner cancel requests.
+
+```solidity
+function requestSentiment(string calldata asset) external payable returns (bytes32 requestId) {
+    if (bytes(asset).length == 0) revert EmptyAsset();
+    if (_defaultAgents.length == 0) revert NoDefaultAgents();
+
+    bytes memory queryData = abi.encode(asset);
+    uint256 deadline = block.timestamp + defaultDeadlineDuration;
+
+    requestId = _requestQuery("ai_sentiment", queryData, deadline, _defaultAgents);
+
+    _requestAssets[requestId] = asset;
+    _requestPayments[requestId] = RequestPayment({payer: msg.sender, amount: msg.value});
+
+    emit SentimentRequested(requestId, asset, msg.sender);
+}
+```
