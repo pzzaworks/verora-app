@@ -15,6 +15,8 @@ const config = defineConfig({
       <Image className="docs-logo-dark" src="/logo-white.svg" alt={siteConfig.name} width={24} height={24} unoptimized />
     </>
   ),
+  // Light until the visitor picks a theme, instead of following the OS
+  theme: { defaultTheme: 'light' },
   contentDir: 'content/docs',
   baseUrl: '/docs',
   siteUrl: siteConfig.url,
