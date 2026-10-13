@@ -12,10 +12,15 @@ function origin(url: string | undefined): string {
 }
 
 const apiOrigin = origin(process.env.NEXT_PUBLIC_API_URL);
-const rpcOrigin = origin(process.env.NEXT_PUBLIC_RPC_URL);
+// NEXT_PUBLIC_RPC_URL can list several endpoints, comma-separated
+const rpcOrigins = (process.env.NEXT_PUBLIC_RPC_URL ?? '')
+  .split(',')
+  .map((url) => origin(url.trim()))
+  .filter(Boolean)
+  .join(' ');
 
 /**
- * Content Security Policy. Network access is limited to the app, the Verora API, and the configured RPC
+ * Content Security Policy. Network access is limited to the app, the Verora API, and the configured RPCs
  * (plus https for wallets and chain public RPCs). Next.js needs inline scripts for hydration; the dev
  * server additionally needs eval and websocket HMR.
  */
@@ -26,7 +31,7 @@ const csp = [
   // Images only from the app and the API (which hosts agent icons and banners); other agent image hosts fall back to a monogram
   `img-src 'self' data: blob:${apiOrigin ? ` ${apiOrigin}` : ''}`,
   "font-src 'self' data:",
-  `connect-src 'self' https: wss:${apiOrigin ? ` ${apiOrigin}` : ''}${rpcOrigin ? ` ${rpcOrigin}` : ''}${isDev ? ' ws: http://localhost:*' : ''}`,
+  `connect-src 'self' https: wss:${apiOrigin ? ` ${apiOrigin}` : ''}${rpcOrigins ? ` ${rpcOrigins}` : ''}${isDev ? ' ws: http://localhost:*' : ''}`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

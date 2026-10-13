@@ -1,6 +1,7 @@
 import { http, createConfig } from 'wagmi';
 import { foundry, sepolia } from 'wagmi/chains';
 import { injected } from 'wagmi/connectors';
+import { failover } from '@/lib/failover-transport';
 
 /** Networks the app can target: a local Anvil node for development and Ethereum Sepolia (Etherscan explorer) */
 const CHAINS = { foundry, sepolia } as const;
@@ -14,16 +15,23 @@ function resolveChain(value: string | undefined) {
 /** The single network this deployment of the app targets */
 export const targetChain = resolveChain(process.env.NEXT_PUBLIC_CHAIN);
 
-/** Optional dedicated RPC (recommended for public networks); falls back to the chain's public RPC */
-const rpcUrl = process.env.NEXT_PUBLIC_RPC_URL || undefined;
+/**
+ * Optional comma-separated RPC endpoints, used one at a time and failed over in order when the active one
+ * stops answering; without any, the chain's default public RPC is used
+ */
+const rpcUrls = (process.env.NEXT_PUBLIC_RPC_URL ?? '')
+  .split(',')
+  .map((url) => url.trim())
+  .filter(Boolean);
+const transport = rpcUrls.length > 0 ? failover(rpcUrls, { timeout: 10_000 }) : http();
 
 export const config = createConfig({
   chains: [targetChain],
   connectors: [injected()],
   // Only the target chain is used; the map is keyed by every supported chain to satisfy the types
   transports: {
-    [foundry.id]: http(rpcUrl),
-    [sepolia.id]: http(rpcUrl),
+    [foundry.id]: transport,
+    [sepolia.id]: transport,
   },
   ssr: true,
 });

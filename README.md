@@ -54,7 +54,7 @@ All values are public and inlined at build time, so the Docker image takes them 
 | --- | --- | --- |
 | `NEXT_PUBLIC_CHAIN` | Yes | `sepolia` (Ethereum Sepolia) or `foundry` (local Anvil). |
 | `NEXT_PUBLIC_API_URL` | Yes | Verora API base URL, for example `https://api.veroraprotocol.com`. |
-| `NEXT_PUBLIC_RPC_URL` | No | Dedicated RPC endpoint; defaults to the chain's public RPC. |
+| `NEXT_PUBLIC_RPC_URL` | No | Comma-separated RPC endpoints, used one at a time and failed over in order when the active one stops answering; defaults to the chain's public RPC. |
 | `NEXT_PUBLIC_SITE_URL` | No | Public origin for canonical URLs, the sitemap, and social cards. Defaults to `https://veroraprotocol.com`. |
 | `NEXT_PUBLIC_AGENT_REGISTRY_ADDRESS` | Yes | `AgentRegistry` address from the deployment manifest. |
 | `NEXT_PUBLIC_QUERY_CONSUMER_ADDRESS` | Yes | `QueryConsumer` address. |

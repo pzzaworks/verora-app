@@ -15,7 +15,7 @@ malformed. Copy `verora-api/.env.example` to `.env` to start.
 | `PORT` | No | `4100` | HTTP port. |
 | `DATABASE_URL` | Yes | - | `postgres://` or `postgresql://` connection string. |
 | `CHAIN` | Yes | - | `foundry` (local Anvil) or `sepolia` (Ethereum Sepolia). |
-| `RPC_URL` | Yes | - | `http`, `https`, `ws`, or `wss` RPC URL. |
+| `RPC_URL` | Yes | - | Comma-separated `http`/`https` RPC URLs, used one at a time and failed over in order when the active one stops answering, or a single `ws`/`wss` URL. |
 | `AGENT_REGISTRY_ADDRESS` | Yes | - | From the deployment manifest. |
 | `QUERY_CONSUMER_ADDRESS` | Yes | - | From the deployment manifest. |
 | `STAKING_POOL_ADDRESS` | Yes | - | From the deployment manifest. |
@@ -48,7 +48,7 @@ missing or malformed. See `verora-app/.env.example`.
 | Variable | Description |
 | --- | --- |
 | `NEXT_PUBLIC_CHAIN` | Target network: `foundry` (local Anvil) or `sepolia` (Ethereum Sepolia). |
-| `NEXT_PUBLIC_RPC_URL` | Dedicated RPC endpoint (recommended on public networks). Defaults to the chain's public RPC. |
+| `NEXT_PUBLIC_RPC_URL` | Comma-separated RPC endpoints, used one at a time and failed over in order when the active one stops answering (no background probing). Defaults to the chain's public RPC. |
 | `NEXT_PUBLIC_API_URL` | Verora API base URL, for example `https://api.veroraprotocol.com`. |
 | `NEXT_PUBLIC_SITE_URL` | Optional public origin of the app, used for canonical URLs, the sitemap, and social cards. Defaults to `https://veroraprotocol.com`. |
 | `NEXT_PUBLIC_AGENT_REGISTRY_ADDRESS` | From the deployment manifest. |
