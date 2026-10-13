@@ -293,7 +293,10 @@ export function useQueryDetail(queryId: Hex | undefined) {
   });
 
   const notIndexed = indexed.error instanceof ApiRequestError && indexed.error.status === 404;
-  const chainId = notIndexed ? queryId : undefined;
+  // The index trails the safe head (minutes on Sepolia) while the oracle settles at the latest block, so
+  // an indexed query that is still open there is also followed on-chain until the index catches up
+  const indexedOpen = !!indexed.data && !isSettled(API_STATUS[indexed.data.status]);
+  const chainId = notIndexed || indexedOpen ? queryId : undefined;
   const chainInfo = useQueryInfo(chainId);
   const chainResponses = useQueryResponses(chainId);
   const chainStatus = chainInfo.data?.status as QueryStatus | undefined;
@@ -305,7 +308,29 @@ export function useQueryDetail(queryId: Hex | undefined) {
   }, [chainStatus, refetchChainResponses]);
 
   const data = useMemo<QueryDetail | undefined>(() => {
-    if (indexed.data) return fromApi(indexed.data);
+    const chainResponseDetails = (): QueryResponseDetail[] =>
+      (chainResponses.data ?? []).map((response) => ({
+        agentId: response.agentId,
+        responseData: response.responseData,
+        submittedAt: response.submittedAt,
+        txHash: null,
+      }));
+
+    if (indexed.data) {
+      const detail = fromApi(indexed.data);
+      const live = chainInfo.data;
+      const liveResponses = chainResponses.data ?? [];
+      if (!indexedOpen || !live) return detail;
+      if (live.status <= detail.status && liveResponses.length <= detail.responses.length) return detail;
+      // The chain is ahead of the index: show its status and responses, without the index's stale delivery state
+      return {
+        ...detail,
+        status: Math.max(live.status, detail.status) as QueryStatus,
+        responses: liveResponses.length > detail.responses.length ? chainResponseDetails() : detail.responses,
+        dispatches: null,
+        source: 'chain',
+      };
+    }
     if (!notIndexed || !chainInfo.data) return undefined;
     const info = chainInfo.data;
     return {
@@ -322,16 +347,11 @@ export function useQueryDetail(queryId: Hex | undefined) {
       aggregatedResult: null,
       finalizedAt: null,
       txHash: null,
-      responses: (chainResponses.data ?? []).map((response) => ({
-        agentId: response.agentId,
-        responseData: response.responseData,
-        submittedAt: response.submittedAt,
-        txHash: null,
-      })),
+      responses: chainResponseDetails(),
       dispatches: null,
       source: 'chain',
     };
-  }, [indexed.data, notIndexed, chainInfo.data, chainResponses.data]);
+  }, [indexed.data, indexedOpen, notIndexed, chainInfo.data, chainResponses.data]);
 
   const notFound = notIndexed && isQueryNotFoundRevert(chainInfo.error);
   const error = notFound ? null : notIndexed ? (data ? null : chainInfo.error) : indexed.data ? null : indexed.error;
