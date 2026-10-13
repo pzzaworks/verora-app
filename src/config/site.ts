@@ -17,7 +17,7 @@ export const siteConfig = {
   /** Square brand mark used for Open Graph and Twitter cards */
   ogImage: { url: '/verora-app.png', width: 1024, height: 1024, alt: 'Verora' },
   links: {
-    github: 'https://github.com/pzzaworks',
+    github: 'https://github.com/pzzaworks/verora-sdk',
     docs: '/docs',
     terms: 'https://pzza.works/terms-conditions',
     privacy: 'https://pzza.works/privacy-policy',

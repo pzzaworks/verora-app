@@ -110,3 +110,14 @@
 .text-muted {
   color: var(--color-muted);
 }
+
+/* Docs logo: pzzadocs marks its dark theme with .dark or [data-theme='dark'] */
+.docs-logo-dark {
+  display: none;
+}
+:is(.dark, [data-theme='dark']) .docs-logo-light {
+  display: none;
+}
+:is(.dark, [data-theme='dark']) .docs-logo-dark {
+  display: block;
+}
