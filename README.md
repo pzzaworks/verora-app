@@ -66,7 +66,7 @@ All values are public and inlined at build time, so the Docker image takes them 
 
 - [verora-contracts](https://github.com/pzzaworks/verora-contracts) - Solidity contracts (Foundry)
 - [verora-api](https://github.com/pzzaworks/verora-api) - Indexer, oracle, and REST API
-- [verora-sdk](https://github.com/pzzaworks/verora-sdk) - TypeScript SDK, `npm install @verora/sdk viem`
+- [verora-sdk](https://github.com/pzzaworks/verora-sdk) - TypeScript SDK, `npm install verora-sdk viem`
 
 ## Tech Stack
 

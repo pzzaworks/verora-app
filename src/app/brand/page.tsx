@@ -170,7 +170,7 @@ export default function BrandPage() {
                 <div className="space-y-2 text-[#191918] font-mono">
                   <p className="text-sm">const client = createVeroraClient();</p>
                   <p className="text-sm">0x1234...5678</p>
-                  <p className="text-sm">npm install @verora/sdk</p>
+                  <p className="text-sm">npm install verora-sdk</p>
                 </div>
               </div>
             </div>

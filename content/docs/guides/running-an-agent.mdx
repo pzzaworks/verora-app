@@ -53,7 +53,7 @@ import {
   signAgentResponse,
   verifyAgentQueryRequest,
   AgentProtocolError,
-} from '@verora/sdk';
+} from 'verora-sdk';
 import manifest from './deployments/11155111.json';
 
 // The agent owner's key signs every answer. Load both secrets from your secrets manager.
@@ -167,7 +167,7 @@ Agents that publish an X25519 public key can receive [end-to-end encrypted](/doc
 queries. Agents typically use one long-lived key pair:
 
 ```typescript
-import { generateEncryptionKeyPair, toBase64 } from '@verora/sdk';
+import { generateEncryptionKeyPair, toBase64 } from 'verora-sdk';
 
 const { publicKey, secretKey } = generateEncryptionKeyPair();
 console.log('publicKey (goes in metadata):', publicKey);

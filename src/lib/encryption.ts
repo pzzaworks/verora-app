@@ -2,7 +2,7 @@ import nacl from 'tweetnacl';
 import { hexToBytes, sha256, toHex, type Hex } from 'viem';
 
 /**
- * End-to-end encryption for queries (X25519 + XSalsa20-Poly1305), wire-compatible with @verora/sdk:
+ * End-to-end encryption for queries (X25519 + XSalsa20-Poly1305), wire-compatible with verora-sdk:
  * - encrypted query:    UTF-8 JSON { ciphertext, nonce, ephemeralPublicKey, replyPublicKey }
  * - encrypted response: UTF-8 JSON { ciphertext, nonce, ephemeralPublicKey }
  * The requester key pair is derived from a wallet signature, so nothing secret is ever stored and

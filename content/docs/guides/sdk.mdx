@@ -1,17 +1,17 @@
 ---
 title: Using the SDK
-description: Install @verora/sdk, then send queries as a requester or answer them as an agent builder, from a frontend or a Node.js backend.
+description: Install verora-sdk, then send queries as a requester or answer them as an agent builder, from a frontend or a Node.js backend.
 icon: CodeXml
 ---
 
-The `@verora/sdk` package wraps the contracts and the Verora API. It is built on
+The `verora-sdk` package wraps the contracts and the Verora API. It is built on
 [viem](https://viem.sh): you bring a public client (and a wallet client for writes), and pass the
 deployment manifest of the network you target. The public network is Ethereum Sepolia (chain 11155111).
 
 ## Install
 
 ```package-install
-npm install @verora/sdk viem
+npm install verora-sdk viem
 ```
 
 `viem` is a peer dependency. The package ships ESM and CommonJS builds with type definitions.
@@ -25,7 +25,7 @@ Send a paid query to an agent and read its answer. Save the network's manifest f
 import { createPublicClient, createWalletClient, http, parseEther, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
-import { VeroraClient, decodeText, encodeText, parseDeployment } from '@verora/sdk';
+import { VeroraClient, decodeText, encodeText, parseDeployment } from 'verora-sdk';
 import manifest from './deployments/11155111.json';
 
 // Load the key from a secrets manager or the environment; never commit it
@@ -78,7 +78,7 @@ import {
   parseDeployment,
   signAgentResponse,
   verifyAgentQueryRequest,
-} from '@verora/sdk';
+} from 'verora-sdk';
 import manifest from './deployments/11155111.json';
 
 // Load both secrets from your secrets manager; never commit them
@@ -147,7 +147,7 @@ app.listen(8080);
     built-in addresses: `parseDeployment` validates the manifest and returns checksummed addresses.
 
     ```typescript
-    import { parseDeployment } from '@verora/sdk';
+    import { parseDeployment } from 'verora-sdk';
     import manifest from './deployments/11155111.json';
 
     const contracts = parseDeployment(manifest);
@@ -161,7 +161,7 @@ app.listen(8080);
         ```typescript
         import { createPublicClient, createWalletClient, custom, http } from 'viem';
         import { sepolia } from 'viem/chains';
-        import { VeroraClient } from '@verora/sdk';
+        import { VeroraClient } from 'verora-sdk';
 
         const [account] = await window.ethereum.request({ method: 'eth_requestAccounts' });
         const publicClient = createPublicClient({ chain: sepolia, transport: http() });
@@ -180,7 +180,7 @@ app.listen(8080);
         import { createPublicClient, createWalletClient, http, type Hex } from 'viem';
         import { privateKeyToAccount } from 'viem/accounts';
         import { sepolia } from 'viem/chains';
-        import { VeroraClient } from '@verora/sdk';
+        import { VeroraClient } from 'verora-sdk';
 
         // Load the key from a secrets manager or the environment; never commit it
         const account = privateKeyToAccount(process.env.REQUESTER_KEY as Hex);
@@ -225,7 +225,7 @@ record plus `status` and `reputation`.
 ## Send a plaintext query
 
 ```typescript
-import { decodeText, encodeText } from '@verora/sdk';
+import { decodeText, encodeText } from 'verora-sdk';
 import { parseEther } from 'viem';
 
 const { queryId, receipt } = await client.createQuery({
@@ -261,7 +261,7 @@ Encrypted queries keep both the prompt and the answer unreadable on-chain. Your 
 a wallet signature, so nothing secret is stored and answers stay readable after reloads.
 
 ```typescript
-import { deriveEncryptionKeyPair } from '@verora/sdk';
+import { deriveEncryptionKeyPair } from 'verora-sdk';
 import { parseEther } from 'viem';
 
 // Derived from a wallet signature: nothing secret is stored
@@ -294,7 +294,7 @@ See [End-to-End Encryption](/docs/guides/encryption) for the wire format.
 ## Cancel, expire, and refunds
 
 ```typescript
-import { FinalizationWindowOpenError } from '@verora/sdk';
+import { FinalizationWindowOpenError } from 'verora-sdk';
 
 await client.cancelQuery(queryId); // requester only, while the query has no responses
 
@@ -350,7 +350,7 @@ check locally (such as `ttlSeconds`, pagination, IDs, and addresses passed to `c
 `InvalidArgumentError` before anything is sent.
 
 ```typescript
-import { ApiError, InvalidArgumentError, QueryTimeoutError, TransactionError, VeroraError } from '@verora/sdk';
+import { ApiError, InvalidArgumentError, QueryTimeoutError, TransactionError, VeroraError } from 'verora-sdk';
 
 try {
   await client.createQuery(params);
@@ -373,7 +373,7 @@ You don't need the SDK to integrate. The SDK exports the ABIs (`queryConsumerAbi
 contracts with viem, wagmi, or any other library:
 
 ```typescript
-import { encodeText, queryConsumerAbi } from '@verora/sdk';
+import { encodeText, queryConsumerAbi } from 'verora-sdk';
 import { parseEther } from 'viem';
 
 const block = await publicClient.getBlock();

@@ -67,7 +67,7 @@ Stripped down, sending a query and reading the answer looks like this:
 import { createPublicClient, createWalletClient, http, parseEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { foundry } from 'viem/chains';
-import { VeroraClient, decodeText, encodeText, parseDeployment } from '@verora/sdk';
+import { VeroraClient, decodeText, encodeText, parseDeployment } from 'verora-sdk';
 import manifest from '../verora-contracts/deployments/31337.json';
 
 // Public Anvil development key (account 4). Never use it on a real network.

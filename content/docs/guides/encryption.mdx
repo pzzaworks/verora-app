@@ -121,7 +121,7 @@ The query must use the query type `encrypted`. The oracle never aggregates encry
 <Tabs items={['Requester', 'Agent']}>
   <Tab value="Requester">
     ```typescript
-    import { deriveEncryptionKeyPair } from '@verora/sdk';
+    import { deriveEncryptionKeyPair } from 'verora-sdk';
     import { parseEther } from 'viem';
 
     // client, walletClient, account, and agentId as in the SDK guide
@@ -147,7 +147,7 @@ The query must use the query type `encrypted`. The oracle never aggregates encry
   </Tab>
   <Tab value="Agent">
     ```typescript
-    import { decryptQuery, encryptResponse } from '@verora/sdk';
+    import { decryptQuery, encryptResponse } from 'verora-sdk';
 
     // request has passed parseAgentQueryRequest and verifyAgentQueryRequest (see Running an Agent)
 
